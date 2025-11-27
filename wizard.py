@@ -1,24 +1,26 @@
 """
 Wizard - Visual training dashboard with 3 panels:
-1. Left: Swarm visualization (all birds playing with real sprites)
+1. Left: Swarm visualization (all birds playing - THIS IS THE EVALUATION)
 2. Top Right: Fitness graph
 3. Bottom Right: Network topology
+
+Key architectural change: The visualization IS the fitness evaluation.
+Birds play visually, their scores determine fitness, then evolution happens.
 """
 
 import os
 import copy
 import random
 import tempfile
-import threading
 import time
-from queue import Queue, Empty
 
 import pygame
 import neat
 
-from game import (SwarmGame, Bird, Pipe, SCREEN_WIDTH, SCREEN_HEIGHT,
+import game as game_module  # For modifying GAME_MODE at runtime
+from game import (SwarmGame, SCREEN_WIDTH, SCREEN_HEIGHT,
                   FLOOR_Y, BIRD_X, BIRD_RX, BIRD_RY, PIPE_WIDTH, PIPE_GAP)
-from config import BASE_CONFIG, EXPERIMENTS, SHARED_CONFIG, TRAIN_SEEDS
+from config import BASE_CONFIG, EXPERIMENTS, SHARED_CONFIG, GA_CONFIG
 from trainer import StaticNetwork, calculate_genome_size, random_genome, mutate, uniform_crossover
 
 # Window dimensions
@@ -67,30 +69,35 @@ class Wizard:
         # State
         self.experiment = None
         self.generation = 0
+        self.max_generations = SHARED_CONFIG["generations"]
         self.fitness_history = []  # [(gen, best, avg, min), ...]
-        self.current_genomes = []
-        self.current_fitnesses = []
-        self.current_best_genome = None
-        self.neat_config = None
-        self.is_neat = True
-        self.is_recurrent = False
-        self.hidden_layers = []
-
-        # Training thread communication
-        self.training_queue = Queue()
-        self.training_thread = None
-        self.training_active = False
         self.training_done = False
         self.paused = False
         self.speed = 1  # 1=normal, 0=max speed
 
-        # Visualization state
-        self.swarm_game = None
+        # NEAT/GA specific state
+        self.neat_config = None
+        self.neat_population = None
+        self.is_neat = True
+        self.is_recurrent = False
+        self.hidden_layers = []
+
+        # Current generation state
+        self.genomes = []  # List of (genome_id, genome) for NEAT or just genomes for GA
         self.networks = []
+        self.current_best_genome = None
+
+        # Swarm game state (VISUALIZATION = EVALUATION)
+        self.swarm_game = None
         self.vis_frame = 0
-        self.vis_generation = 0  # Which generation we're currently visualizing
-        self.death_time = None  # Time when all birds died (for restart delay)
-        self.restart_delay = 1.5  # Seconds to wait before restarting
+        self.max_frames = 5000  # Max frames per generation
+
+        # Death pause tracking
+        self.death_time = None
+        self.death_delay = 1.0  # Seconds to show dead state before evolving
+
+        # Game mode (standard or oscillating pipes)
+        self.game_mode = game_module.GAME_MODE  # Start with config default
 
     def _load_sprites(self):
         """Load game sprites."""
@@ -113,9 +120,16 @@ class Wizard:
     def run(self):
         """Main loop."""
         running = True
-        self.show_experiment_selection()
 
         while running:
+            # Show experiment selection if no experiment active
+            if self.experiment is None:
+                self.show_experiment_selection()
+                if self.experiment is None:
+                    break  # User quit during selection
+                continue
+
+            # Handle events
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
                     running = False
@@ -124,19 +138,20 @@ class Wizard:
                         self.paused = not self.paused
                     elif event.key == pygame.K_s:
                         self.speed = 0 if self.speed == 1 else 1
+                    elif event.key == pygame.K_o:
+                        # Toggle oscillating pipes
+                        self.game_mode = "oscillating" if self.game_mode == "standard" else "standard"
+                        game_module.GAME_MODE = self.game_mode
+                    elif event.key == pygame.K_r:
+                        # Return to experiment selector
+                        self._reset_state()
+                        continue
                     elif event.key == pygame.K_ESCAPE:
                         running = False
 
-            # Check for training updates
-            self._process_training_queue()
-
-            # Auto-restart visualization when all birds die (with delay)
-            if self.swarm_game and self.swarm_game.all_dead and not self.paused:
-                if self.death_time is None:
-                    self.death_time = time.time()
-                elif time.time() - self.death_time >= self.restart_delay:
-                    self._reset_swarm_visualization()
-                    self.death_time = None
+            # Game logic (only if not paused)
+            if not self.paused and not self.training_done:
+                self._step_training()
 
             # Draw all panels
             self.draw_game_panel()
@@ -156,8 +171,23 @@ class Wizard:
             pygame.display.flip()
             self.clock.tick(60 if self.speed == 1 else 0)
 
-        self.training_active = False
         pygame.quit()
+
+    def _reset_state(self):
+        """Reset all state to return to experiment selector."""
+        self.experiment = None
+        self.generation = 0
+        self.fitness_history = []
+        self.training_done = False
+        self.paused = False
+        self.speed = 1
+        self.neat_config = None
+        self.neat_population = None
+        self.genomes = []
+        self.networks = []
+        self.current_best_genome = None
+        self.swarm_game = None
+        self.death_time = None
 
     def show_experiment_selection(self):
         """Show experiment selection screen."""
@@ -177,14 +207,14 @@ class Wizard:
                 text = self.font.render(f"{exp} ({neat_ga}, {ff_rnn})", True, color)
                 self.screen.blit(text, (WINDOW_WIDTH // 2 - text.get_width() // 2, 200 + i * 50))
 
-            instructions = self.font.render("UP/DOWN to select, ENTER to start", True, LIGHT_GRAY)
+            instructions = self.font.render("UP/DOWN to select, ENTER to start, ESC to quit", True, LIGHT_GRAY)
             self.screen.blit(instructions, (WINDOW_WIDTH // 2 - instructions.get_width() // 2, 450))
 
             pygame.display.flip()
 
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
-                    pygame.quit()
+                    self.experiment = None
                     return
                 elif event.type == pygame.KEYDOWN:
                     if event.key == pygame.K_UP:
@@ -192,26 +222,37 @@ class Wizard:
                     elif event.key == pygame.K_DOWN:
                         selected = (selected + 1) % len(experiments)
                     elif event.key == pygame.K_RETURN:
-                        self.start_experiment(experiments[selected])
+                        self._start_experiment(experiments[selected])
+                        return
+                    elif event.key == pygame.K_ESCAPE:
+                        self.experiment = None
                         return
 
-    def start_experiment(self, experiment_name):
-        """Start training for selected experiment."""
+    def _start_experiment(self, experiment_name):
+        """Initialize experiment and first generation."""
         self.experiment = experiment_name
         exp = EXPERIMENTS[experiment_name]
         self.is_neat = exp.get("use_neat", True)
         self.is_recurrent = not exp["feed_forward"]
         self.hidden_layers = exp.get("hidden_layers", [])
+        self.generation = 0
+        self.fitness_history = []
+        self.training_done = False
 
-        # Build config
         if self.is_neat:
             self.neat_config = self._build_neat_config(experiment_name)
+            self.neat_population = neat.Population(self.neat_config)
+            # Get initial genomes
+            self.genomes = list(self.neat_population.population.items())
+            self._create_networks_neat()
+        else:
+            pop_size = SHARED_CONFIG["pop_size"]
+            genome_size = calculate_genome_size(self.hidden_layers, self.is_recurrent)
+            self.genomes = [random_genome(genome_size) for _ in range(pop_size)]
+            self._create_networks_ga()
 
-        # Start training thread
-        self.training_active = True
-        self.training_done = False
-        self.training_thread = threading.Thread(target=self._training_loop, daemon=True)
-        self.training_thread.start()
+        # Start first generation's swarm game
+        self._start_generation_game()
 
     def _build_neat_config(self, experiment_name):
         """Build NEAT config from experiment."""
@@ -242,164 +283,157 @@ class Wizard:
             lines.append("")
         return "\n".join(lines)
 
-    def _training_loop(self):
-        """Training loop running in separate thread."""
+    def _create_networks_neat(self):
+        """Create neural networks for NEAT genomes."""
+        self.networks = []
+        for genome_id, genome in self.genomes:
+            if self.is_recurrent:
+                net = neat.nn.RecurrentNetwork.create(genome, self.neat_config)
+            else:
+                net = neat.nn.FeedForwardNetwork.create(genome, self.neat_config)
+            self.networks.append(net)
+
+    def _create_networks_ga(self):
+        """Create neural networks for GA genomes."""
+        self.networks = []
+        for genome in self.genomes:
+            net = StaticNetwork(genome, self.hidden_layers, self.is_recurrent)
+            self.networks.append(net)
+
+    def _start_generation_game(self):
+        """Start a new swarm game for the current generation."""
+        num_birds = len(self.genomes)
+        seed = int(time.time() * 1000) % (2**31)  # Random seed for variety
+        self.swarm_game = SwarmGame(num_birds, seed=seed)
+        self.swarm_game.reset()
+        self.vis_frame = 0
+        self.death_time = None
+
+        # Reset recurrent networks
+        if self.is_recurrent:
+            for net in self.networks:
+                if hasattr(net, 'reset'):
+                    net.reset()
+
+    def _step_training(self):
+        """Step the training forward - runs swarm game and handles evolution."""
+        if self.swarm_game is None:
+            return
+
+        # Check if generation is complete
+        if self.swarm_game.all_dead or self.vis_frame >= self.max_frames:
+            if self.death_time is None:
+                self.death_time = time.time()
+            elif time.time() - self.death_time >= self.death_delay:
+                self._finish_generation()
+            return
+
+        # Step the swarm game with neural network decisions
+        observations = self.swarm_game.get_observations()
+        actions = []
+        for i, (obs, net) in enumerate(zip(observations, self.networks)):
+            if self.swarm_game.alive[i]:
+                output = net.activate(obs)
+                action = output[0] > 0 if isinstance(output, (list, tuple)) else output > 0
+                actions.append(action)
+            else:
+                actions.append(False)
+
+        self.swarm_game.step(actions)
+        self.vis_frame += 1
+
+    def _finish_generation(self):
+        """Finish current generation: record fitness, evolve, start next."""
+        # Composite fitness for BREEDING (survival + score*1000) - ensures gradient
+        fitnesses = self.swarm_game.get_fitnesses()
+
+        # Pipe SCORES for DISPLAY (what user cares about)
+        scores = self.swarm_game.scores
+        best_score = max(scores)
+        avg_score = sum(scores) / len(scores)
+        min_score = min(scores)
+        self.fitness_history.append((self.generation, best_score, avg_score, min_score))
+
+        # Find best genome for network visualization
+        best_idx = fitnesses.index(max(fitnesses))
         if self.is_neat:
-            self._run_neat_training()
+            self.current_best_genome = self.genomes[best_idx][1]
         else:
-            self._run_ga_training()
+            self.current_best_genome = self.genomes[best_idx]
 
-    def _run_neat_training(self):
-        """Run NEAT training."""
-        population = neat.Population(self.neat_config)
-        generations = SHARED_CONFIG["generations"]
-        gen_count = [0]
+        # Check if training is complete
+        self.generation += 1
+        if self.generation >= self.max_generations:
+            self.training_done = True
+            return
 
-        def eval_genomes(genomes, config):
-            if not self.training_active:
-                return
+        # Evolve to next generation
+        if self.is_neat:
+            self._evolve_neat(fitnesses)
+        else:
+            self._evolve_ga(fitnesses)
 
-            # Create networks for visualization
-            networks = []
-            for genome_id, genome in genomes:
-                if self.is_recurrent:
-                    net = neat.nn.RecurrentNetwork.create(genome, config)
-                else:
-                    net = neat.nn.FeedForwardNetwork.create(genome, config)
-                networks.append((genome, net))
+        # Start next generation's game
+        self._start_generation_game()
 
-            # Evaluate on training seeds
-            for genome, net in networks:
-                total_score = 0
-                for seed in TRAIN_SEEDS:
-                    from game import FlappyGame, play_game
-                    game = FlappyGame(seed=seed)
-                    score = play_game(net, game, max_frames=5000)
-                    total_score += score
-                genome.fitness = total_score / len(TRAIN_SEEDS)
+    def _evolve_neat(self, fitnesses):
+        """Evolve NEAT population to next generation."""
+        # Assign fitnesses to genomes
+        for i, (genome_id, genome) in enumerate(self.genomes):
+            genome.fitness = fitnesses[i]
 
-            # Send to visualization
-            fitnesses = [g.fitness for _, g in genomes]
-            best_idx = fitnesses.index(max(fitnesses))
-            self.training_queue.put({
-                "type": "generation",
-                "generation": gen_count[0],
-                "genomes": [g for _, g in genomes],
-                "fitnesses": fitnesses,
-                "best_genome": genomes[best_idx][1],
-                "networks": [n for _, n in networks]
-            })
-            gen_count[0] += 1
+        # Let NEAT do reproduction
+        self.neat_population.population = {gid: g for gid, g in self.genomes}
 
-        for _ in range(generations):
-            if not self.training_active:
-                break
-            population.run(eval_genomes, 1)
+        # Run one generation of evolution
+        self.neat_population.species.speciate(
+            self.neat_config, self.neat_population.population, self.neat_population.generation)
 
-        self.training_queue.put({"type": "done"})
+        # Reproduce
+        self.neat_population.population = self.neat_population.reproduction.reproduce(
+            self.neat_config, self.neat_population.species,
+            SHARED_CONFIG["pop_size"], self.neat_population.generation)
 
-    def _run_ga_training(self):
-        """Run static GA training."""
+        # Check for stagnation and possibly adjust
+        self.neat_population.species.speciate(
+            self.neat_config, self.neat_population.population, self.neat_population.generation)
+
+        self.neat_population.generation += 1
+
+        # Get new genomes
+        self.genomes = list(self.neat_population.population.items())
+        self._create_networks_neat()
+
+    def _evolve_ga(self, fitnesses):
+        """Evolve static GA population to next generation."""
         pop_size = SHARED_CONFIG["pop_size"]
-        generations = SHARED_CONFIG["generations"]
         elitism = SHARED_CONFIG["elitism"]
-        genome_size = calculate_genome_size(self.hidden_layers, self.is_recurrent)
+        survival_threshold = GA_CONFIG["survival_threshold"]
 
-        population = [random_genome(genome_size) for _ in range(pop_size)]
+        # Selection and reproduction
+        ranked = sorted(zip(self.genomes, fitnesses), key=lambda x: -x[1])
+        new_population = [list(ranked[i][0]) for i in range(elitism)]
+        parent_pool = [g for g, _ in ranked[:max(2, int(pop_size * survival_threshold))]]
 
-        for gen in range(generations):
-            if not self.training_active:
-                break
+        while len(new_population) < pop_size:
+            p1, p2 = random.sample(parent_pool, 2)
+            child = mutate(uniform_crossover(p1, p2))
+            new_population.append(child)
 
-            # Evaluate population
-            fitnesses = []
-            networks = []
-            for genome in population:
-                net = StaticNetwork(genome, self.hidden_layers, self.is_recurrent)
-                networks.append(net)
-                total_score = 0
-                for seed in TRAIN_SEEDS:
-                    from game import FlappyGame
-                    game = FlappyGame(seed=seed)
-                    game.reset()
-                    for _ in range(5000):
-                        obs = game.get_observation()
-                        output = net.activate(obs)
-                        action = output[0] > 0
-                        _, _, done, _ = game.step(action)
-                        if done:
-                            break
-                    total_score += game.score
-                    if self.is_recurrent:
-                        net.reset()
-                fitnesses.append(total_score / len(TRAIN_SEEDS))
-
-            # Send to visualization
-            best_idx = fitnesses.index(max(fitnesses))
-            self.training_queue.put({
-                "type": "generation",
-                "generation": gen,
-                "genomes": population.copy(),
-                "fitnesses": fitnesses,
-                "best_genome": population[best_idx],
-                "networks": [StaticNetwork(g, self.hidden_layers, self.is_recurrent) for g in population]
-            })
-
-            # Selection and reproduction
-            ranked = sorted(zip(population, fitnesses), key=lambda x: -x[1])
-            new_population = [list(ranked[i][0]) for i in range(elitism)]
-            parent_pool = [g for g, _ in ranked[:max(2, int(pop_size * 0.2))]]
-            while len(new_population) < pop_size:
-                p1, p2 = random.sample(parent_pool, 2)
-                child = mutate(uniform_crossover(p1, p2))
-                new_population.append(child)
-            population = new_population
-
-        self.training_queue.put({"type": "done"})
-
-    def _process_training_queue(self):
-        """Process messages from training thread."""
-        try:
-            while True:
-                msg = self.training_queue.get_nowait()
-                if msg["type"] == "generation":
-                    self.generation = msg["generation"]
-                    self.current_genomes = msg["genomes"]
-                    self.current_fitnesses = msg["fitnesses"]
-                    self.current_best_genome = msg["best_genome"]
-                    self.networks = msg["networks"]
-
-                    # Update fitness history
-                    best = max(self.current_fitnesses)
-                    avg = sum(self.current_fitnesses) / len(self.current_fitnesses)
-                    min_fit = min(self.current_fitnesses)
-                    self.fitness_history.append((self.generation, best, avg, min_fit))
-
-                    # Reset swarm for new generation visualization
-                    self._reset_swarm_visualization()
-
-                elif msg["type"] == "done":
-                    self.training_active = False
-                    self.training_done = True
-        except Empty:
-            pass
-
-    def _reset_swarm_visualization(self):
-        """Reset swarm game for visualizing current generation."""
-        if self.current_genomes and self.networks:
-            self.swarm_game = SwarmGame(len(self.current_genomes), seed=TRAIN_SEEDS[0])
-            self.vis_frame = 0
-            self.vis_generation = self.generation
-            self.death_time = None  # Reset death timer
+        self.genomes = new_population
+        self._create_networks_ga()
 
     def draw_game_panel(self):
-        """Draw the swarm visualization panel with sprites."""
+        """Draw the swarm visualization panel with sprites (this IS the evaluation)."""
         # Calculate scaling to fit game in panel
         scale_x = GAME_PANEL_WIDTH / SCREEN_WIDTH
         scale_y = WINDOW_HEIGHT / SCREEN_HEIGHT
         scale = min(scale_x, scale_y)
         offset_x = (GAME_PANEL_WIDTH - SCREEN_WIDTH * scale) / 2
         offset_y = (WINDOW_HEIGHT - SCREEN_HEIGHT * scale) / 2
+
+        # Create a clip rect for the game area
+        game_rect = pygame.Rect(offset_x, offset_y, SCREEN_WIDTH * scale, SCREEN_HEIGHT * scale)
 
         # Draw background
         if self.sprites_loaded:
@@ -410,35 +444,21 @@ class Wizard:
         else:
             self.game_surface.fill(SKY_BLUE)
 
-        if not self.swarm_game or not self.networks:
+        if self.swarm_game is None:
             # Show waiting message
-            text = self.font_large.render("Waiting for training...", True, WHITE)
+            text = self.font_large.render("Select an experiment...", True, WHITE)
             self.game_surface.blit(text, (GAME_PANEL_WIDTH // 2 - text.get_width() // 2,
                                           WINDOW_HEIGHT // 2))
             return
 
-        # Step simulation if not paused and birds alive
-        if not self.paused and not self.swarm_game.all_dead:
-            observations = self.swarm_game.get_observations()
-            actions = []
-            for i, (obs, net) in enumerate(zip(observations, self.networks)):
-                if self.swarm_game.alive[i]:
-                    output = net.activate(obs)
-                    action = output[0] > 0 if isinstance(output, (list, tuple)) else output > 0
-                    actions.append(action)
-                else:
-                    actions.append(False)
-            self.swarm_game.step(actions)
-            self.vis_frame += 1
+        # Set clip rect to prevent drawing outside game area
+        self.game_surface.set_clip(game_rect)
 
-        # Draw pipes (only those within visible game area)
+        # Draw pipes
         if self.sprites_loaded:
             scaled_pipe = pygame.transform.scale(self.pipe_img,
                 (int(self.pipe_img.get_width() * scale), int(self.pipe_img.get_height() * scale)))
             for pipe in self.swarm_game.pipes:
-                # Skip pipes outside visible game area
-                if pipe.x > SCREEN_WIDTH or pipe.x + PIPE_WIDTH < 0:
-                    continue
                 pipe_x = int(pipe.x * scale + offset_x)
                 # Top pipe (flipped)
                 pipe_top = pygame.transform.flip(scaled_pipe, False, True)
@@ -449,9 +469,6 @@ class Wizard:
                 self.game_surface.blit(scaled_pipe, (pipe_x, bot_y))
         else:
             for pipe in self.swarm_game.pipes:
-                # Skip pipes outside visible game area
-                if pipe.x > SCREEN_WIDTH or pipe.x + PIPE_WIDTH < 0:
-                    continue
                 pipe_x = int(pipe.x * scale + offset_x)
                 pipe_w = int(PIPE_WIDTH * scale)
                 top_h = int(pipe.gap_top * scale)
@@ -462,52 +479,53 @@ class Wizard:
                 pygame.draw.rect(self.game_surface, PIPE_GREEN,
                                (pipe_x, bot_y, pipe_w, bot_h))
 
-        # Draw birds with transparency based on fitness
-        if self.current_fitnesses:
-            min_fit = min(self.current_fitnesses)
-            max_fit = max(self.current_fitnesses)
+        # Remove clip for birds/UI (birds can fly off-screen)
+        self.game_surface.set_clip(None)
 
-            # Sort by fitness so better ones draw on top
-            bird_data = list(zip(self.swarm_game.birds, self.swarm_game.alive,
-                                self.current_fitnesses))
-            bird_data.sort(key=lambda x: x[2])
+        # Get survival frames for transparency (shows who's doing well)
+        survival = self.swarm_game.get_survival_frames()
+        min_surv = min(survival) if survival else 0
+        max_surv = max(survival) if survival else 1
 
-            for bird, alive, fitness in bird_data:
-                if not alive:
-                    continue
+        # Sort birds by survival so better ones draw on top
+        bird_data = list(zip(self.swarm_game.birds, self.swarm_game.alive, survival))
+        bird_data.sort(key=lambda x: x[2])
 
-                # Calculate alpha based on fitness
-                if max_fit > min_fit:
-                    normalized = (fitness - min_fit) / (max_fit - min_fit)
-                else:
-                    normalized = 1.0
-                alpha = int(50 + normalized * 205)
+        for bird, alive, surv_frames in bird_data:
+            if not alive:
+                continue
 
-                # Bird position
-                bx = int(bird.x * scale + offset_x)
-                by = int(bird.y * scale + offset_y)
+            # Calculate alpha based on survival time
+            if max_surv > min_surv:
+                normalized = (surv_frames - min_surv) / (max_surv - min_surv)
+            else:
+                normalized = 1.0
+            alpha = int(80 + normalized * 175)  # 80-255 range
 
-                if self.sprites_loaded:
-                    # Scale and rotate bird sprite
-                    scaled_bird = pygame.transform.scale(self.bird_img,
-                        (int(self.bird_img.get_width() * scale),
-                         int(self.bird_img.get_height() * scale)))
-                    rotated = pygame.transform.rotate(scaled_bird, -bird.vel * 3)
-                    # Apply alpha
-                    rotated.set_alpha(alpha)
-                    self.game_surface.blit(rotated, (bx, by))
-                else:
-                    # Fallback: draw ellipse
-                    rx = int(BIRD_RX * scale)
-                    ry = int(BIRD_RY * scale)
-                    cx = bx + int(40 * scale)
-                    cy = by + int(30 * scale)
-                    bird_surf = pygame.Surface((rx * 2, ry * 2), pygame.SRCALPHA)
-                    color = (*YELLOW[:3], alpha)
-                    pygame.draw.ellipse(bird_surf, color, (0, 0, rx * 2, ry * 2))
-                    self.game_surface.blit(bird_surf, (cx - rx, cy - ry))
+            # Bird position
+            bx = int(bird.x * scale + offset_x)
+            by = int(bird.y * scale + offset_y)
 
-        # Draw base/floor
+            if self.sprites_loaded:
+                scaled_bird = pygame.transform.scale(self.bird_img,
+                    (int(self.bird_img.get_width() * scale),
+                     int(self.bird_img.get_height() * scale)))
+                rotated = pygame.transform.rotate(scaled_bird, -bird.vel * 3)
+                rotated.set_alpha(alpha)
+                self.game_surface.blit(rotated, (bx, by))
+            else:
+                # Fallback: draw ellipse
+                rx = int(BIRD_RX * scale)
+                ry = int(BIRD_RY * scale)
+                cx = bx + int(40 * scale)
+                cy = by + int(30 * scale)
+                bird_surf = pygame.Surface((rx * 2, ry * 2), pygame.SRCALPHA)
+                color = (*YELLOW[:3], alpha)
+                pygame.draw.ellipse(bird_surf, color, (0, 0, rx * 2, ry * 2))
+                self.game_surface.blit(bird_surf, (cx - rx, cy - ry))
+
+        # Draw base/floor (set clip again for this)
+        self.game_surface.set_clip(game_rect)
         if self.sprites_loaded:
             scaled_base = pygame.transform.scale(self.base_img,
                 (int(SCREEN_WIDTH * scale), int(self.base_img.get_height() * scale)))
@@ -516,7 +534,8 @@ class Wizard:
         else:
             floor_y = int(FLOOR_Y * scale + offset_y)
             pygame.draw.rect(self.game_surface, DARK_GREEN,
-                            (0, floor_y, GAME_PANEL_WIDTH, WINDOW_HEIGHT - floor_y))
+                            (offset_x, floor_y, int(SCREEN_WIDTH * scale), WINDOW_HEIGHT - floor_y))
+        self.game_surface.set_clip(None)
 
         # Draw score
         best_score = max(self.swarm_game.scores) if self.swarm_game.scores else 0
@@ -528,16 +547,16 @@ class Wizard:
         alive_count = sum(self.swarm_game.alive)
         total_count = len(self.swarm_game.alive)
         status = "PAUSED" if self.paused else ("DONE" if self.training_done else "Training")
+        pipes_mode = "Oscillating" if self.game_mode == "oscillating" else "Static"
 
         info_lines = [
-            f"Gen: {self.generation} | Visualizing: {self.vis_generation}",
-            f"Alive: {alive_count}/{total_count}",
+            f"Gen: {self.generation} | Experiment: {self.experiment}",
+            f"Alive: {alive_count}/{total_count} | Pipes: {pipes_mode}",
             f"Status: {status} | Speed: {'Normal' if self.speed == 1 else 'Max'}",
-            f"[SPACE] Pause | [S] Speed | [ESC] Quit"
+            f"[SPACE] Pause | [S] Speed | [O] Pipes | [R] Reset | [ESC] Quit"
         ]
         for i, line in enumerate(info_lines):
             text = self.font.render(line, True, WHITE)
-            # Draw shadow for readability
             shadow = self.font.render(line, True, BLACK)
             self.game_surface.blit(shadow, (12, 12 + i * 22))
             self.game_surface.blit(text, (10, 10 + i * 22))
@@ -574,7 +593,7 @@ class Wizard:
         bests = [h[1] for h in self.fitness_history]
         avgs = [h[2] for h in self.fitness_history]
 
-        max_gen = max(max(gens), 1) if gens else 1  # Ensure at least 1 to avoid div by zero
+        max_gen = max(max(gens), 1) if gens else 1
         max_fit = max(max(bests), max(avgs)) if bests else 1
         max_fit = max(max_fit, 1)
 
@@ -661,8 +680,8 @@ class Wizard:
         node_pos = {}
         layer_x = lambda l: margin + (l / (num_layers - 1)) * width if num_layers > 1 else cx
 
-        # Input layer
-        input_labels = ["vel", "dist", "gap"]
+        # Input layer - correct labels: vel, dist (horizontal), y_off (vertical offset)
+        input_labels = ["vel", "dist", "y_off"]
         for i, node in enumerate(input_nodes):
             y = cy - height // 4 + (i - 1) * (height // 3)
             node_pos[node] = (layer_x(0), y, input_labels[i])
@@ -733,7 +752,8 @@ class Wizard:
 
         # Node positions
         node_pos = {}
-        layer_labels = [["vel", "dist", "gap"]]
+        # Correct labels: vel, dist (horizontal distance), y_off (vertical offset)
+        layer_labels = [["vel", "dist", "y_off"]]
         for i, size in enumerate(self.hidden_layers):
             layer_labels.append([f"h{j}" for j in range(size)])
         layer_labels.append(["jump"])

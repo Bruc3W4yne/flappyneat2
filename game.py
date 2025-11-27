@@ -179,6 +179,7 @@ class SwarmGame:
         self.birds = [Bird() for _ in range(self.num_birds)]
         self.alive = [True] * self.num_birds
         self.scores = [0] * self.num_birds
+        self.death_frames = [None] * self.num_birds  # Track when each bird died
         self.pipes = [Pipe()]
         self.frame = 0
         return self.get_observations()
@@ -220,6 +221,7 @@ class SwarmGame:
         for i, bird in enumerate(self.birds):
             if self.alive[i] and self._check_collision(bird):
                 self.alive[i] = False
+                self.death_frames[i] = self.frame  # Record when this bird died
 
         return self.get_observations(), self.alive.copy(), self.scores.copy()
 
@@ -255,3 +257,19 @@ class SwarmGame:
     @property
     def all_dead(self):
         return not any(self.alive)
+
+    def get_survival_frames(self):
+        """Get survival frames for each bird (death_frame if dead, current frame if alive)."""
+        return [
+            self.death_frames[i] if self.death_frames[i] is not None else self.frame
+            for i in range(self.num_birds)
+        ]
+
+    def get_fitnesses(self):
+        """Get composite fitness: survival_frames + score * 1000.
+
+        This ensures there's always a gradient even when scores are 0.
+        Passing a pipe (score +1) is worth 1000 frames of survival (~17 seconds at 60fps).
+        """
+        survival = self.get_survival_frames()
+        return [survival[i] + self.scores[i] * 1000 for i in range(self.num_birds)]
