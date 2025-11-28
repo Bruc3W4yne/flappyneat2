@@ -45,6 +45,8 @@ class Pipe:
         if prev_gap_center is not None:
             min_center = max(min_center, prev_gap_center - MAX_GAP_CHANGE)
             max_center = min(max_center, prev_gap_center + MAX_GAP_CHANGE)
+        if min_center > max_center:
+            max_center = min_center
         self._base_gap_center = random.randint(int(min_center), int(max_center))
         self._gap_center = self._base_gap_center
         self.x = SCREEN_WIDTH + 100
@@ -86,6 +88,11 @@ def ellipse_rect_collide(cx, cy, rx, ry, rect):
     dx = (closest_x - cx) / rx
     dy = (closest_y - cy) / ry
     return (dx * dx + dy * dy) < 1
+
+
+def network_to_action(output):
+    """Convert network output to jump action (True/False)."""
+    return output[0] > 0.0 if isinstance(output, (list, tuple)) else output > 0.0
 
 
 class FlappyGame:
@@ -157,8 +164,7 @@ def play_game(network, game, max_frames=5000):
     game.reset()
     for _ in range(max_frames):
         obs = game.get_observation()
-        output = network.activate(obs)
-        action = output[0] > 0.0 if isinstance(output, (list, tuple)) else output > 0.0
+        action = network_to_action(network.activate(obs))
         _, _, done, _ = game.step(action)
         if done:
             break

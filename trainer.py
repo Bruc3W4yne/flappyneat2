@@ -58,14 +58,20 @@ def build_neat_config(experiment_name):
     return neat_config
 
 
+def create_network(genome, config, is_recurrent=None):
+    """Create a neural network from a NEAT genome."""
+    if is_recurrent is None:
+        is_recurrent = not config.genome_config.feed_forward
+    if is_recurrent:
+        return neat.nn.RecurrentNetwork.create(genome, config)
+    return neat.nn.FeedForwardNetwork.create(genome, config)
+
+
 def evaluate_genome_neat(genome, config, seeds, max_frames=50000):
     is_recurrent = not config.genome_config.feed_forward
     total_score = 0
     for seed in seeds:
-        if is_recurrent:
-            net = neat.nn.RecurrentNetwork.create(genome, config)
-        else:
-            net = neat.nn.FeedForwardNetwork.create(genome, config)
+        net = create_network(genome, config, is_recurrent)
         game = FlappyGame(seed=seed)
         score = play_game(net, game, max_frames=max_frames)
         total_score += score

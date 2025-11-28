@@ -1,7 +1,9 @@
 import pickle
-import neat
-from trainer import build_neat_config
-from game import FlappyGame
+from trainer import build_neat_config, create_network
+from game import FlappyGame, network_to_action
+
+# Input node labels: vel=velocity, dist=horizontal distance, y_off=vertical offset to gap
+INPUT_LABELS = {-1: "vel", -2: "dist", -3: "y_off"}
 
 
 def analyze_network(winner_path, experiment_name="neat_ff"):
@@ -20,8 +22,8 @@ def analyze_network(winner_path, experiment_name="neat_ff"):
     for key, conn in winner.connections.items():
         if conn.enabled:
             src, dst = key
-            src_name = {-1: "vel", -2: "i", -3: "j"}.get(src, f"h{src}")
-            dst_name = {0: "output"}.get(dst, f"h{dst}")
+            src_name = INPUT_LABELS.get(src, f"h{src}")
+            dst_name = {0: "jump"}.get(dst, f"h{dst}")
             print(f"  {src_name} -> {dst_name}: weight = {conn.weight:.3f}")
 
     print("\nNode biases:")
@@ -29,17 +31,14 @@ def analyze_network(winner_path, experiment_name="neat_ff"):
         name = {0: "output"}.get(key, f"h{key}")
         print(f"  {name}: bias = {node.bias:.3f}")
 
-    if is_recurrent:
-        net = neat.nn.RecurrentNetwork.create(winner, config)
-    else:
-        net = neat.nn.FeedForwardNetwork.create(winner, config)
+    net = create_network(winner, config, is_recurrent)
 
     print("\n" + "=" * 50)
     print("BEHAVIOR ANALYSIS")
     print("=" * 50)
 
     print("\nOutput for different observations (tanh activation, >0 means jump):")
-    print(f"{'vel':>6} {'i':>6} {'j':>6} -> {'output':>8} {'action':>8}")
+    print(f"{'vel':>6} {'dist':>6} {'y_off':>6} -> {'output':>8} {'action':>8}")
     print("-" * 45)
 
     test_cases = [
@@ -47,27 +46,27 @@ def analyze_network(winner_path, experiment_name="neat_ff"):
         (0.5, 0.5, 0.1), (-0.5, 0.5, 0.1), (1.0, 0.5, -0.1),
         (0.0, 0.1, 0.05), (0.0, 0.9, 0.05),
     ]
-    for vel, i, j in test_cases:
-        output = net.activate((vel, i, j))
-        action = "JUMP" if output[0] > 0 else "fall"
-        print(f"{vel:>6.2f} {i:>6.2f} {j:>6.2f} -> {output[0]:>8.3f} {action:>8}")
+    for vel, dist, y_off in test_cases:
+        output = net.activate((vel, dist, y_off))
+        action = "JUMP" if network_to_action(output) else "fall"
+        print(f"{vel:>6.2f} {dist:>6.2f} {y_off:>6.2f} -> {output[0]:>8.3f} {action:>8}")
 
     print("\n" + "=" * 50)
     print("LEARNED DECISION BOUNDARY")
     print("=" * 50)
 
-    print("\nFinding j threshold where action changes (vel=0, i=0.5):")
-    for j in [-0.3, -0.2, -0.1, 0.0, 0.1, 0.2, 0.3]:
-        output = net.activate((0.0, 0.5, j))
-        action = "JUMP" if output[0] > 0 else "fall"
-        print(f"  j={j:+.2f}: output={output[0]:+.3f} -> {action}")
+    print("\nFinding y_off threshold where action changes (vel=0, dist=0.5):")
+    for y_off in [-0.3, -0.2, -0.1, 0.0, 0.1, 0.2, 0.3]:
+        output = net.activate((0.0, 0.5, y_off))
+        action = "JUMP" if network_to_action(output) else "fall"
+        print(f"  y_off={y_off:+.2f}: output={output[0]:+.3f} -> {action}")
 
     print("\nSearching for exact decision boundary...")
-    for j_int in range(-30, 30):
-        j = j_int / 100.0
-        output = net.activate((0.0, 0.5, j))
+    for y_int in range(-30, 30):
+        y_off = y_int / 100.0
+        output = net.activate((0.0, 0.5, y_off))
         if abs(output[0]) < 0.1:
-            print(f"  Near boundary at j={j:.2f}: output={output[0]:.4f}")
+            print(f"  Near boundary at y_off={y_off:.2f}: output={output[0]:.4f}")
 
 
 def test_on_seeds(winner_path, experiment_name="neat_ff"):
@@ -82,16 +81,13 @@ def test_on_seeds(winner_path, experiment_name="neat_ff"):
 
     scores = []
     for seed in range(50):
-        if is_recurrent:
-            net = neat.nn.RecurrentNetwork.create(winner, config)
-        else:
-            net = neat.nn.FeedForwardNetwork.create(winner, config)
+        net = create_network(winner, config, is_recurrent)
         game = FlappyGame(seed=seed)
         game.reset()
         for frame in range(50000):
             obs = game.get_observation()
             output = net.activate(obs)
-            action = output[0] > 0
+            action = network_to_action(output)
             _, _, done, score = game.step(action)
             if done:
                 break
@@ -102,16 +98,13 @@ def test_on_seeds(winner_path, experiment_name="neat_ff"):
 
     print("\nEval seeds [42, 123, 456]:")
     for seed in [42, 123, 456]:
-        if is_recurrent:
-            net = neat.nn.RecurrentNetwork.create(winner, config)
-        else:
-            net = neat.nn.FeedForwardNetwork.create(winner, config)
+        net = create_network(winner, config, is_recurrent)
         game = FlappyGame(seed=seed)
         game.reset()
         for frame in range(50000):
             obs = game.get_observation()
             output = net.activate(obs)
-            action = output[0] > 0
+            action = network_to_action(output)
             _, _, done, score = game.step(action)
             if done:
                 print(f"  Seed {seed}: score={score}, died at frame {frame}")

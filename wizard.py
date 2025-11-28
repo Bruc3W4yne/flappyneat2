@@ -9,6 +9,7 @@ Birds play visually, their scores determine fitness, then evolution happens.
 """
 
 import os
+import csv
 import copy
 import random
 import tempfile
@@ -17,11 +18,12 @@ import time
 import pygame
 import neat
 
-import game as game_module  # For modifying GAME_MODE at runtime
-from game import (SwarmGame, SCREEN_WIDTH, SCREEN_HEIGHT,
-                  FLOOR_Y, BIRD_X, BIRD_RX, BIRD_RY, PIPE_WIDTH, PIPE_GAP)
-from config import BASE_CONFIG, EXPERIMENTS, SHARED_CONFIG, GA_CONFIG
-from trainer import StaticNetwork, calculate_genome_size, random_genome, mutate, uniform_crossover
+import game as game_module
+from game import (SwarmGame, SCREEN_WIDTH, SCREEN_HEIGHT, FLOOR_Y,
+                  BIRD_X, BIRD_RX, BIRD_RY, PIPE_WIDTH, PIPE_GAP, network_to_action)
+from config import BASE_CONFIG, EXPERIMENTS, SHARED_CONFIG, GA_CONFIG, MAX_FRAMES
+from trainer import (StaticNetwork, calculate_genome_size, random_genome,
+                     mutate, uniform_crossover, create_network)
 
 # Window dimensions
 WINDOW_WIDTH = 1400
@@ -90,7 +92,7 @@ class Wizard:
         # Swarm game state (VISUALIZATION = EVALUATION)
         self.swarm_game = None
         self.vis_frame = 0
-        self.max_frames = 5000  # Max frames per generation
+        self.max_frames = MAX_FRAMES
 
         # Death pause tracking
         self.death_time = None
@@ -333,14 +335,22 @@ class Wizard:
         actions = []
         for i, (obs, net) in enumerate(zip(observations, self.networks)):
             if self.swarm_game.alive[i]:
-                output = net.activate(obs)
-                action = output[0] > 0 if isinstance(output, (list, tuple)) else output > 0
+                action = network_to_action(net.activate(obs))
                 actions.append(action)
             else:
                 actions.append(False)
 
         self.swarm_game.step(actions)
         self.vis_frame += 1
+
+    def _save_csv(self):
+        """Save fitness history to CSV file."""
+        os.makedirs("results", exist_ok=True)
+        csv_path = f"results/{self.experiment}_wizard.csv"
+        with open(csv_path, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["generation", "best_fitness", "avg_fitness", "min_fitness"])
+            writer.writerows(self.fitness_history)
 
     def _finish_generation(self):
         """Finish current generation: record fitness, evolve, start next."""
@@ -353,6 +363,9 @@ class Wizard:
         avg_score = sum(scores) / len(scores)
         min_score = min(scores)
         self.fitness_history.append((self.generation, best_score, avg_score, min_score))
+
+        # Auto-save CSV after each generation
+        self._save_csv()
 
         # Find best genome for network visualization
         best_idx = fitnesses.index(max(fitnesses))
@@ -546,11 +559,12 @@ class Wizard:
         # Draw info overlay
         alive_count = sum(self.swarm_game.alive)
         total_count = len(self.swarm_game.alive)
-        status = "PAUSED" if self.paused else ("DONE" if self.training_done else "Training")
+        progress = int(100 * self.generation / self.max_generations) if self.max_generations > 0 else 0
+        status = "PAUSED" if self.paused else ("DONE" if self.training_done else f"{progress}%")
         pipes_mode = "Oscillating" if self.game_mode == "oscillating" else "Static"
 
         info_lines = [
-            f"Gen: {self.generation} | Experiment: {self.experiment}",
+            f"Gen: {self.generation}/{self.max_generations} | {self.experiment}",
             f"Alive: {alive_count}/{total_count} | Pipes: {pipes_mode}",
             f"Status: {status} | Speed: {'Normal' if self.speed == 1 else 'Max'}",
             f"[SPACE] Pause | [S] Speed | [O] Pipes | [R] Reset | [ESC] Quit"
