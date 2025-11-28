@@ -8,7 +8,7 @@ import math
 import neat
 
 from game import FlappyGame, play_game
-from config import BASE_CONFIG, EXPERIMENTS, SHARED_CONFIG, GA_CONFIG, TRAIN_SEEDS, TEST_SEEDS
+from config import BASE_CONFIG, EXPERIMENTS, SHARED_CONFIG, GA_CONFIG, TRAIN_SEEDS, TEST_SEEDS, MAX_FRAMES_EVAL
 
 
 class CSVReporter(neat.reporting.BaseReporter):
@@ -59,7 +59,6 @@ def build_neat_config(experiment_name):
 
 
 def create_network(genome, config, is_recurrent=None):
-    """Create a neural network from a NEAT genome."""
     if is_recurrent is None:
         is_recurrent = not config.genome_config.feed_forward
     if is_recurrent:
@@ -67,7 +66,7 @@ def create_network(genome, config, is_recurrent=None):
     return neat.nn.FeedForwardNetwork.create(genome, config)
 
 
-def evaluate_genome_neat(genome, config, seeds, max_frames=50000):
+def evaluate_genome_neat(genome, config, seeds, max_frames=MAX_FRAMES_EVAL):
     is_recurrent = not config.genome_config.feed_forward
     total_score = 0
     for seed in seeds:
@@ -97,7 +96,7 @@ def run_neat(experiment_name, generations=None, seeds=None, verbose=True, trial_
         population.add_reporter(neat.StatisticsReporter())
     os.makedirs("results", exist_ok=True)
     population.add_reporter(CSVReporter(f"results/{experiment_name}_trial{trial_id}.csv"))
-    eval_fn = make_eval_genomes(seeds, max_frames=50000)
+    eval_fn = make_eval_genomes(seeds, max_frames=MAX_FRAMES_EVAL)
     winner = population.run(eval_fn, generations)
     return winner, config
 
@@ -194,7 +193,7 @@ def mutate(genome):
     return new_genome
 
 
-def evaluate_genome_ga(genome, hidden_layers, is_recurrent, seeds, max_frames=50000):
+def evaluate_genome_ga(genome, hidden_layers, is_recurrent, seeds, max_frames=MAX_FRAMES_EVAL):
     total_score = 0
     for seed in seeds:
         net = StaticNetwork(genome, hidden_layers, is_recurrent)

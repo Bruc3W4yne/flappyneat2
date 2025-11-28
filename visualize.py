@@ -4,7 +4,7 @@ import argparse
 import pygame
 import neat
 
-from game import FlappyGame, SCREEN_WIDTH, SCREEN_HEIGHT, FLOOR_Y, PIPE_WIDTH, BIRD_RX, BIRD_RY
+from game import FlappyGame, SCREEN_WIDTH, SCREEN_HEIGHT, FLOOR_Y, PIPE_WIDTH, BIRD_RX, BIRD_RY, network_to_action
 from trainer import build_neat_config, StaticNetwork
 from config import EXPERIMENTS
 
@@ -82,8 +82,7 @@ def watch_agent(winner_path, experiment_name):
                 show_hitbox = not show_hitbox
 
         obs = game.get_observation()
-        output = net.activate(obs)
-        action = output[0] > 0.0 if isinstance(output, (list, tuple)) else output > 0.0
+        action = network_to_action(net.activate(obs))
         _, _, done, _ = game.step(action)
         renderer.render(game, show_hitbox)
 

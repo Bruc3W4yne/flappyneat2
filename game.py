@@ -91,7 +91,6 @@ def ellipse_rect_collide(cx, cy, rx, ry, rect):
 
 
 def network_to_action(output):
-    """Convert network output to jump action (True/False)."""
     return output[0] > 0.0 if isinstance(output, (list, tuple)) else output > 0.0
 
 
@@ -172,8 +171,6 @@ def play_game(network, game, max_frames=5000):
 
 
 class SwarmGame:
-    """Multi-bird game for visualization - all birds share the same pipes."""
-
     def __init__(self, num_birds, seed=None):
         self.num_birds = num_birds
         self.seed = seed
@@ -191,7 +188,6 @@ class SwarmGame:
         return self.get_observations()
 
     def get_observations(self):
-        """Get observation for each bird."""
         observations = []
         pipe = self._next_pipe()
         for i, bird in enumerate(self.birds):
@@ -209,10 +205,8 @@ class SwarmGame:
         return observations
 
     def step(self, actions):
-        """Step all birds with their respective actions."""
         self.frame += 1
 
-        # Update each bird
         for i, (bird, action) in enumerate(zip(self.birds, actions)):
             if not self.alive[i]:
                 continue
@@ -220,10 +214,8 @@ class SwarmGame:
                 bird.jump()
             bird.update()
 
-        # Update pipes (shared)
         self._update_pipes()
 
-        # Check collisions
         for i, bird in enumerate(self.birds):
             if self.alive[i] and self._check_collision(bird):
                 self.alive[i] = False

@@ -1,5 +1,6 @@
 # Training constants
 MAX_FRAMES = 5000
+MAX_FRAMES_EVAL = 50000
 TARGET_FPS = 60
 
 # Seeds for reproducibility

@@ -25,17 +25,14 @@ from config import BASE_CONFIG, EXPERIMENTS, SHARED_CONFIG, GA_CONFIG, MAX_FRAME
 from trainer import (StaticNetwork, calculate_genome_size, random_genome,
                      mutate, uniform_crossover, create_network)
 
-# Window dimensions
 WINDOW_WIDTH = 1400
 WINDOW_HEIGHT = 900
 GAME_PANEL_WIDTH = int(WINDOW_WIDTH * 0.6)
 RIGHT_PANEL_WIDTH = WINDOW_WIDTH - GAME_PANEL_WIDTH
 RIGHT_PANEL_HEIGHT = WINDOW_HEIGHT // 2
 
-# Assets path
 ASSETS_PATH = os.path.join(os.path.dirname(__file__), "..", "imgs")
 
-# Colors
 BLACK = (0, 0, 0)
 WHITE = (255, 255, 255)
 DARK_GRAY = (40, 40, 50)
@@ -60,15 +57,12 @@ class Wizard:
         self.font_large = pygame.font.Font(None, 36)
         self.font_score = pygame.font.Font(None, 48)
 
-        # Load sprites
         self._load_sprites()
 
-        # Panel surfaces
         self.game_surface = pygame.Surface((GAME_PANEL_WIDTH, WINDOW_HEIGHT))
         self.graph_surface = pygame.Surface((RIGHT_PANEL_WIDTH, RIGHT_PANEL_HEIGHT))
         self.network_surface = pygame.Surface((RIGHT_PANEL_WIDTH, RIGHT_PANEL_HEIGHT))
 
-        # State
         self.experiment = None
         self.generation = 0
         self.max_generations = SHARED_CONFIG["generations"]
@@ -94,15 +88,12 @@ class Wizard:
         self.vis_frame = 0
         self.max_frames = MAX_FRAMES
 
-        # Death pause tracking
         self.death_time = None
         self.death_delay = 1.0  # Seconds to show dead state before evolving
 
-        # Game mode (standard or oscillating pipes)
-        self.game_mode = game_module.GAME_MODE  # Start with config default
+        self.game_mode = game_module.GAME_MODE
 
     def _load_sprites(self):
-        """Load game sprites."""
         try:
             self.bg_img = pygame.transform.scale(
                 pygame.image.load(os.path.join(ASSETS_PATH, "bg.png")).convert(),
@@ -120,18 +111,15 @@ class Wizard:
             self.sprites_loaded = False
 
     def run(self):
-        """Main loop."""
         running = True
 
         while running:
-            # Show experiment selection if no experiment active
             if self.experiment is None:
                 self.show_experiment_selection()
                 if self.experiment is None:
                     break  # User quit during selection
                 continue
 
-            # Handle events
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
                     running = False
@@ -145,27 +133,22 @@ class Wizard:
                         self.game_mode = "oscillating" if self.game_mode == "standard" else "standard"
                         game_module.GAME_MODE = self.game_mode
                     elif event.key == pygame.K_r:
-                        # Return to experiment selector
                         self._reset_state()
                         continue
                     elif event.key == pygame.K_ESCAPE:
                         running = False
 
-            # Game logic (only if not paused)
             if not self.paused and not self.training_done:
                 self._step_training()
 
-            # Draw all panels
             self.draw_game_panel()
             self.draw_graph_panel()
             self.draw_network_panel()
 
-            # Blit panels to screen
             self.screen.blit(self.game_surface, (0, 0))
             self.screen.blit(self.graph_surface, (GAME_PANEL_WIDTH, 0))
             self.screen.blit(self.network_surface, (GAME_PANEL_WIDTH, RIGHT_PANEL_HEIGHT))
 
-            # Draw panel borders
             pygame.draw.line(self.screen, WHITE, (GAME_PANEL_WIDTH, 0), (GAME_PANEL_WIDTH, WINDOW_HEIGHT), 2)
             pygame.draw.line(self.screen, WHITE, (GAME_PANEL_WIDTH, RIGHT_PANEL_HEIGHT),
                            (WINDOW_WIDTH, RIGHT_PANEL_HEIGHT), 2)
@@ -176,7 +159,6 @@ class Wizard:
         pygame.quit()
 
     def _reset_state(self):
-        """Reset all state to return to experiment selector."""
         self.experiment = None
         self.generation = 0
         self.fitness_history = []
@@ -192,7 +174,6 @@ class Wizard:
         self.death_time = None
 
     def show_experiment_selection(self):
-        """Show experiment selection screen."""
         experiments = list(EXPERIMENTS.keys())
         selected = 0
 
@@ -253,11 +234,9 @@ class Wizard:
             self.genomes = [random_genome(genome_size) for _ in range(pop_size)]
             self._create_networks_ga()
 
-        # Start first generation's swarm game
         self._start_generation_game()
 
     def _build_neat_config(self, experiment_name):
-        """Build NEAT config from experiment."""
         exp = EXPERIMENTS[experiment_name]
         config_dict = copy.deepcopy(BASE_CONFIG)
         config_dict["DefaultGenome"]["feed_forward"] = str(exp["feed_forward"])
@@ -276,7 +255,6 @@ class Wizard:
         return neat_config
 
     def _dict_to_config_file(self, config_dict):
-        """Convert config dict to NEAT config file format."""
         lines = []
         for section, params in config_dict.items():
             lines.append(f"[{section}]")
@@ -286,7 +264,6 @@ class Wizard:
         return "\n".join(lines)
 
     def _create_networks_neat(self):
-        """Create neural networks for NEAT genomes."""
         self.networks = []
         for genome_id, genome in self.genomes:
             if self.is_recurrent:
@@ -296,14 +273,12 @@ class Wizard:
             self.networks.append(net)
 
     def _create_networks_ga(self):
-        """Create neural networks for GA genomes."""
         self.networks = []
         for genome in self.genomes:
             net = StaticNetwork(genome, self.hidden_layers, self.is_recurrent)
             self.networks.append(net)
 
     def _start_generation_game(self):
-        """Start a new swarm game for the current generation."""
         num_birds = len(self.genomes)
         seed = int(time.time() * 1000) % (2**31)  # Random seed for variety
         self.swarm_game = SwarmGame(num_birds, seed=seed)
@@ -322,7 +297,6 @@ class Wizard:
         if self.swarm_game is None:
             return
 
-        # Check if generation is complete
         if self.swarm_game.all_dead or self.vis_frame >= self.max_frames:
             if self.death_time is None:
                 self.death_time = time.time()
@@ -330,7 +304,6 @@ class Wizard:
                 self._finish_generation()
             return
 
-        # Step the swarm game with neural network decisions
         observations = self.swarm_game.get_observations()
         actions = []
         for i, (obs, net) in enumerate(zip(observations, self.networks)):
@@ -344,7 +317,6 @@ class Wizard:
         self.vis_frame += 1
 
     def _save_csv(self):
-        """Save fitness history to CSV file."""
         os.makedirs("results", exist_ok=True)
         csv_path = f"results/{self.experiment}_wizard.csv"
         with open(csv_path, "w", newline="") as f:
@@ -364,66 +336,52 @@ class Wizard:
         min_score = min(scores)
         self.fitness_history.append((self.generation, best_score, avg_score, min_score))
 
-        # Auto-save CSV after each generation
         self._save_csv()
 
-        # Find best genome for network visualization
         best_idx = fitnesses.index(max(fitnesses))
         if self.is_neat:
             self.current_best_genome = self.genomes[best_idx][1]
         else:
             self.current_best_genome = self.genomes[best_idx]
 
-        # Check if training is complete
         self.generation += 1
         if self.generation >= self.max_generations:
             self.training_done = True
             return
 
-        # Evolve to next generation
         if self.is_neat:
             self._evolve_neat(fitnesses)
         else:
             self._evolve_ga(fitnesses)
 
-        # Start next generation's game
         self._start_generation_game()
 
     def _evolve_neat(self, fitnesses):
-        """Evolve NEAT population to next generation."""
-        # Assign fitnesses to genomes
         for i, (genome_id, genome) in enumerate(self.genomes):
             genome.fitness = fitnesses[i]
 
-        # Let NEAT do reproduction
         self.neat_population.population = {gid: g for gid, g in self.genomes}
 
-        # Run one generation of evolution
         self.neat_population.species.speciate(
             self.neat_config, self.neat_population.population, self.neat_population.generation)
 
-        # Reproduce
         self.neat_population.population = self.neat_population.reproduction.reproduce(
             self.neat_config, self.neat_population.species,
             SHARED_CONFIG["pop_size"], self.neat_population.generation)
 
-        # Check for stagnation and possibly adjust
         self.neat_population.species.speciate(
             self.neat_config, self.neat_population.population, self.neat_population.generation)
 
         self.neat_population.generation += 1
 
-        # Get new genomes
         self.genomes = list(self.neat_population.population.items())
         self._create_networks_neat()
 
     def _evolve_ga(self, fitnesses):
-        """Evolve static GA population to next generation."""
         pop_size = SHARED_CONFIG["pop_size"]
         elitism = SHARED_CONFIG["elitism"]
         survival_threshold = GA_CONFIG["survival_threshold"]
 
-        # Selection and reproduction
         ranked = sorted(zip(self.genomes, fitnesses), key=lambda x: -x[1])
         new_population = [list(ranked[i][0]) for i in range(elitism)]
         parent_pool = [g for g, _ in ranked[:max(2, int(pop_size * survival_threshold))]]
@@ -445,10 +403,8 @@ class Wizard:
         offset_x = (GAME_PANEL_WIDTH - SCREEN_WIDTH * scale) / 2
         offset_y = (WINDOW_HEIGHT - SCREEN_HEIGHT * scale) / 2
 
-        # Create a clip rect for the game area
         game_rect = pygame.Rect(offset_x, offset_y, SCREEN_WIDTH * scale, SCREEN_HEIGHT * scale)
 
-        # Draw background
         if self.sprites_loaded:
             scaled_bg = pygame.transform.scale(self.bg_img,
                 (int(SCREEN_WIDTH * scale), int(SCREEN_HEIGHT * scale)))
@@ -458,26 +414,21 @@ class Wizard:
             self.game_surface.fill(SKY_BLUE)
 
         if self.swarm_game is None:
-            # Show waiting message
             text = self.font_large.render("Select an experiment...", True, WHITE)
             self.game_surface.blit(text, (GAME_PANEL_WIDTH // 2 - text.get_width() // 2,
                                           WINDOW_HEIGHT // 2))
             return
 
-        # Set clip rect to prevent drawing outside game area
         self.game_surface.set_clip(game_rect)
 
-        # Draw pipes
         if self.sprites_loaded:
             scaled_pipe = pygame.transform.scale(self.pipe_img,
                 (int(self.pipe_img.get_width() * scale), int(self.pipe_img.get_height() * scale)))
             for pipe in self.swarm_game.pipes:
                 pipe_x = int(pipe.x * scale + offset_x)
-                # Top pipe (flipped)
                 pipe_top = pygame.transform.flip(scaled_pipe, False, True)
                 top_y = int(pipe.gap_top * scale + offset_y) - pipe_top.get_height()
                 self.game_surface.blit(pipe_top, (pipe_x, top_y))
-                # Bottom pipe
                 bot_y = int(pipe.gap_bottom * scale + offset_y)
                 self.game_surface.blit(scaled_pipe, (pipe_x, bot_y))
         else:
@@ -508,14 +459,12 @@ class Wizard:
             if not alive:
                 continue
 
-            # Calculate alpha based on survival time
             if max_surv > min_surv:
                 normalized = (surv_frames - min_surv) / (max_surv - min_surv)
             else:
                 normalized = 1.0
-            alpha = int(80 + normalized * 175)  # 80-255 range
+            alpha = int(80 + normalized * 175)
 
-            # Bird position
             bx = int(bird.x * scale + offset_x)
             by = int(bird.y * scale + offset_y)
 
@@ -527,7 +476,6 @@ class Wizard:
                 rotated.set_alpha(alpha)
                 self.game_surface.blit(rotated, (bx, by))
             else:
-                # Fallback: draw ellipse
                 rx = int(BIRD_RX * scale)
                 ry = int(BIRD_RY * scale)
                 cx = bx + int(40 * scale)
@@ -550,13 +498,11 @@ class Wizard:
                             (offset_x, floor_y, int(SCREEN_WIDTH * scale), WINDOW_HEIGHT - floor_y))
         self.game_surface.set_clip(None)
 
-        # Draw score
         best_score = max(self.swarm_game.scores) if self.swarm_game.scores else 0
         score_text = self.font_score.render(str(best_score), True, WHITE)
         self.game_surface.blit(score_text,
             (GAME_PANEL_WIDTH // 2 - score_text.get_width() // 2, int(50 * scale + offset_y)))
 
-        # Draw info overlay
         alive_count = sum(self.swarm_game.alive)
         total_count = len(self.swarm_game.alive)
         progress = int(100 * self.generation / self.max_generations) if self.max_generations > 0 else 0
@@ -576,10 +522,8 @@ class Wizard:
             self.game_surface.blit(text, (10, 10 + i * 22))
 
     def draw_graph_panel(self):
-        """Draw the fitness graph panel."""
         self.graph_surface.fill(DARK_GRAY)
 
-        # Title
         title = self.font.render("Fitness Over Generations", True, WHITE)
         self.graph_surface.blit(title, (RIGHT_PANEL_WIDTH // 2 - title.get_width() // 2, 10))
 
@@ -652,10 +596,8 @@ class Wizard:
         self.graph_surface.blit(x_label, (graph_x + graph_w - 50, graph_y + graph_h + 5))
 
     def draw_network_panel(self):
-        """Draw the network topology panel."""
         self.network_surface.fill(DARK_GRAY)
 
-        # Title
         title = self.font.render("Network Topology (Best Genome)", True, WHITE)
         self.network_surface.blit(title, (RIGHT_PANEL_WIDTH // 2 - title.get_width() // 2, 10))
 
@@ -671,7 +613,6 @@ class Wizard:
             self._draw_static_network()
 
     def _draw_neat_network(self):
-        """Draw NEAT genome network."""
         genome = self.current_best_genome
         margin = 60
         width = RIGHT_PANEL_WIDTH - margin * 2
@@ -690,7 +631,6 @@ class Wizard:
         else:
             num_layers = 2
 
-        # Node positions
         node_pos = {}
         layer_x = lambda l: margin + (l / (num_layers - 1)) * width if num_layers > 1 else cx
 
@@ -700,15 +640,12 @@ class Wizard:
             y = cy - height // 4 + (i - 1) * (height // 3)
             node_pos[node] = (layer_x(0), y, input_labels[i])
 
-        # Hidden layer
         for i, node in enumerate(hidden_nodes):
             y = cy - (len(hidden_nodes) - 1) * 30 // 2 + i * 30
             node_pos[node] = (layer_x(1), y, f"h{node}")
 
-        # Output layer
         node_pos[0] = (layer_x(num_layers - 1), cy, "jump")
 
-        # Draw connections
         for (src, dst), conn in genome.connections.items():
             if not conn.enabled:
                 continue
@@ -718,19 +655,16 @@ class Wizard:
             x1, y1, _ = node_pos[src]
             x2, y2, _ = node_pos[dst]
 
-            # Color based on weight sign
             weight = conn.weight
             if weight > 0:
                 color = GREEN
             else:
                 color = RED
 
-            # Thickness based on weight magnitude
             thickness = max(1, min(5, int(abs(weight))))
 
             pygame.draw.line(self.network_surface, color, (x1, y1), (x2, y2), thickness)
 
-        # Draw nodes
         for node, (x, y, label) in node_pos.items():
             radius = 20
             if node in input_nodes:
@@ -743,28 +677,23 @@ class Wizard:
             pygame.draw.circle(self.network_surface, color, (int(x), int(y)), radius)
             pygame.draw.circle(self.network_surface, WHITE, (int(x), int(y)), radius, 2)
 
-            # Label
             text = self.font.render(label, True, WHITE)
             self.network_surface.blit(text, (x - text.get_width() // 2, y - text.get_height() // 2))
 
-        # Node count info
         info = f"Nodes: {len(genome.nodes)} | Connections: {sum(1 for c in genome.connections.values() if c.enabled)}"
         info_text = self.font.render(info, True, LIGHT_GRAY)
         self.network_surface.blit(info_text, (margin, RIGHT_PANEL_HEIGHT - 30))
 
     def _draw_static_network(self):
-        """Draw static GA network topology."""
         margin = 60
         width = RIGHT_PANEL_WIDTH - margin * 2
         height = RIGHT_PANEL_HEIGHT - margin * 2 - 20
         cx = RIGHT_PANEL_WIDTH // 2
         cy = RIGHT_PANEL_HEIGHT // 2 + 10
 
-        # Layer sizes
         layer_sizes = [3] + self.hidden_layers + [1]
         num_layers = len(layer_sizes)
 
-        # Node positions
         node_pos = {}
         # Correct labels: vel, dist (horizontal distance), y_off (vertical offset)
         layer_labels = [["vel", "dist", "y_off"]]
@@ -778,7 +707,6 @@ class Wizard:
                 y = cy - (size - 1) * 30 // 2 + node_idx * 30
                 node_pos[(layer_idx, node_idx)] = (x, y, labels[node_idx])
 
-        # Draw connections (simplified - just show structure)
         for l in range(num_layers - 1):
             for i in range(layer_sizes[l]):
                 for j in range(layer_sizes[l + 1]):
@@ -786,7 +714,6 @@ class Wizard:
                     x2, y2, _ = node_pos[(l + 1, j)]
                     pygame.draw.line(self.network_surface, LIGHT_GRAY, (x1, y1), (x2, y2), 1)
 
-        # Draw nodes
         for (layer_idx, node_idx), (x, y, label) in node_pos.items():
             radius = 20
             if layer_idx == 0:
@@ -802,7 +729,6 @@ class Wizard:
             text = self.font.render(label, True, WHITE)
             self.network_surface.blit(text, (x - text.get_width() // 2, y - text.get_height() // 2))
 
-        # Network info
         total_params = sum(layer_sizes[i] * layer_sizes[i+1] + layer_sizes[i+1]
                          for i in range(len(layer_sizes) - 1))
         info = f"Layers: {layer_sizes} | Params: {total_params}"
