@@ -8,7 +8,7 @@ import math
 import neat
 
 from game import FlappyGame, play_game
-from config import BASE_CONFIG, EXPERIMENTS, SHARED_CONFIG, GA_CONFIG, TRAIN_SEEDS, TEST_SEEDS, MAX_FRAMES_EVAL
+from config import BASE_CONFIG, EXPERIMENTS, SHARED_CONFIG, GA_CONFIG, TRAIN_SEEDS, TEST_SEEDS, MAX_FRAMES_EVAL, PARAM_SETS
 
 
 class CSVReporter(neat.reporting.BaseReporter):
@@ -40,12 +40,21 @@ def build_neat_config(experiment_name):
     exp = EXPERIMENTS[experiment_name]
     config_dict = copy.deepcopy(BASE_CONFIG)
     config_dict["DefaultGenome"]["feed_forward"] = str(exp["feed_forward"])
+
+    param_set_name = exp.get("param_set", "high")
+    param_set = PARAM_SETS[param_set_name]
+    config_dict["DefaultGenome"]["weight_mutate_rate"] = str(param_set["weight_mutate_rate"])
+
     if not exp.get("use_neat", True):
         config_dict["DefaultGenome"]["node_add_prob"] = "0.0"
         config_dict["DefaultGenome"]["node_delete_prob"] = "0.0"
         config_dict["DefaultGenome"]["conn_add_prob"] = "0.0"
         config_dict["DefaultGenome"]["conn_delete_prob"] = "0.0"
         config_dict["DefaultGenome"]["enabled_mutate_rate"] = "0.0"
+    else:
+        config_dict["DefaultGenome"]["node_add_prob"] = str(param_set["node_add_prob"])
+        config_dict["DefaultGenome"]["conn_add_prob"] = str(param_set["conn_add_prob"])
+
     config_text = dict_to_config_file(config_dict)
     with tempfile.NamedTemporaryFile(mode="w", suffix=".cfg", delete=False) as f:
         f.write(config_text)
@@ -176,8 +185,8 @@ def single_point_crossover(p1, p2):
     return p1[:point] + p2[point:]
 
 
-def mutate(genome):
-    rate = SHARED_CONFIG["weight_mutate_rate"]
+def mutate(genome, weight_mutate_rate=None):
+    rate = weight_mutate_rate if weight_mutate_rate is not None else SHARED_CONFIG["weight_mutate_rate"]
     power = SHARED_CONFIG["weight_mutate_power"]
     replace = SHARED_CONFIG["weight_replace_rate"]
     w_min, w_max = GA_CONFIG["weight_min"], GA_CONFIG["weight_max"]
@@ -217,8 +226,12 @@ def run_static_ga(experiment_name, generations=None, seeds=None, verbose=True, t
     crossover_fn = uniform_crossover if GA_CONFIG["crossover_type"] == "uniform" else single_point_crossover
     genome_size = calculate_genome_size(hidden_layers, is_recurrent)
 
+    param_set_name = exp.get("param_set", "high")
+    param_set = PARAM_SETS[param_set_name]
+    weight_mutate_rate = param_set["weight_mutate_rate"]
+
     if verbose:
-        print(f"Static GA: {experiment_name} | layers={hidden_layers} | genome={genome_size} | pop={pop_size}")
+        print(f"Static GA: {experiment_name} | layers={hidden_layers} | mutate_rate={weight_mutate_rate} | pop={pop_size}")
 
     os.makedirs("results", exist_ok=True)
     csv_path = f"results/{experiment_name}_trial{trial_id}.csv"
@@ -243,7 +256,7 @@ def run_static_ga(experiment_name, generations=None, seeds=None, verbose=True, t
         parent_pool = [g for g, _ in ranked[:max(2, int(pop_size * survival_threshold))]]
         while len(new_population) < pop_size:
             p1, p2 = random.sample(parent_pool, 2)
-            child = mutate(crossover_fn(p1, p2))
+            child = mutate(crossover_fn(p1, p2), weight_mutate_rate)
             new_population.append(child)
         population = new_population
 
@@ -258,7 +271,7 @@ def run_experiment(experiment_name, generations=None, verbose=True, trial_id=0):
     exp = EXPERIMENTS[experiment_name]
     if exp.get("use_neat", True):
         winner, config = run_neat(experiment_name, generations, TRAIN_SEEDS, verbose, trial_id)
-        output_path = f"winner_{experiment_name}.pkl"
+        output_path = f"winner_{experiment_name}_trial{trial_id}.pkl"
         with open(output_path, "wb") as f:
             pickle.dump((winner, config), f)
         if verbose:
@@ -268,7 +281,7 @@ def run_experiment(experiment_name, generations=None, verbose=True, trial_id=0):
         best_genome, hidden_layers, is_recurrent, best_fitness = run_static_ga(
             experiment_name, generations, TRAIN_SEEDS, verbose, trial_id
         )
-        output_path = f"winner_{experiment_name}.pkl"
+        output_path = f"winner_{experiment_name}_trial{trial_id}.pkl"
         with open(output_path, "wb") as f:
             pickle.dump({"genome": best_genome, "hidden_layers": hidden_layers,
                         "is_recurrent": is_recurrent, "fitness": best_fitness}, f)
@@ -277,30 +290,80 @@ def run_experiment(experiment_name, generations=None, verbose=True, trial_id=0):
         return best_genome
 
 
-def evaluate_winner(winner_path, seeds=None, verbose=True):
+def evaluate_winner(winner_path, seeds=None, verbose=True, log_csv=True):
     if seeds is None:
         seeds = TEST_SEEDS
     with open(winner_path, "rb") as f:
         data = pickle.load(f)
+
+    per_seed_scores = []
     if isinstance(data, tuple):
         winner, config = data
-        fitness = evaluate_genome_neat(winner, config, seeds)
+        is_recurrent = not config.genome_config.feed_forward
+        for seed in seeds:
+            net = create_network(winner, config, is_recurrent)
+            game = FlappyGame(seed=seed)
+            score = play_game(net, game, max_frames=MAX_FRAMES_EVAL)
+            per_seed_scores.append(score)
     elif isinstance(data, dict):
-        fitness = evaluate_genome_ga(data["genome"], data["hidden_layers"], data["is_recurrent"], seeds)
+        for seed in seeds:
+            net = StaticNetwork(data["genome"], data["hidden_layers"], data["is_recurrent"])
+            game = FlappyGame(seed=seed)
+            score = play_game(net, game, max_frames=MAX_FRAMES_EVAL)
+            per_seed_scores.append(score)
     else:
         raise ValueError(f"Unknown winner format in {winner_path}")
+
+    fitness = sum(per_seed_scores) / len(per_seed_scores)
+    std_dev = (sum((s - fitness) ** 2 for s in per_seed_scores) / len(per_seed_scores)) ** 0.5
+
     if verbose:
-        print(f"Test fitness ({len(seeds)} seeds): {fitness:.2f}")
+        print(f"Test fitness ({len(seeds)} seeds): {fitness:.2f} ± {std_dev:.2f}")
+        print(f"  Min: {min(per_seed_scores)}, Max: {max(per_seed_scores)}")
+
+    if log_csv:
+        import re
+        match = re.search(r"winner_(.+)_trial(\d+)\.pkl", winner_path)
+        if match:
+            exp_name, trial_id = match.group(1), int(match.group(2))
+            csv_path = "results/test_results.csv"
+            os.makedirs("results", exist_ok=True)
+            write_header = not os.path.exists(csv_path)
+            with open(csv_path, "a", newline="") as f:
+                writer = csv.writer(f)
+                if write_header:
+                    writer.writerow(["experiment", "trial_id", "mean_fitness", "std_dev", "min", "max", "per_seed_scores"])
+                writer.writerow([exp_name, trial_id, f"{fitness:.2f}", f"{std_dev:.2f}",
+                                min(per_seed_scores), max(per_seed_scores), per_seed_scores])
+
     return fitness
 
 
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument("experiment", choices=list(EXPERIMENTS.keys()))
+    parser.add_argument("experiment", nargs="?", choices=list(EXPERIMENTS.keys()))
     parser.add_argument("-g", "--generations", type=int, default=None)
+    parser.add_argument("-n", "--trials", type=int, default=1, help="Number of trials to run")
     parser.add_argument("-t", "--test", action="store_true")
+    parser.add_argument("--run-all", action="store_true", help="Run all 12 experiments sequentially")
     args = parser.parse_args()
-    run_experiment(args.experiment, args.generations, verbose=True)
-    if args.test:
-        evaluate_winner(f"winner_{args.experiment}.pkl", TEST_SEEDS, verbose=True)
+
+    if args.run_all:
+        for exp_name in EXPERIMENTS.keys():
+            for trial in range(args.trials):
+                print(f"\n{'='*60}")
+                print(f"Running experiment: {exp_name} (trial {trial + 1}/{args.trials})")
+                print(f"{'='*60}\n")
+                run_experiment(exp_name, args.generations, verbose=True, trial_id=trial)
+                if args.test:
+                    evaluate_winner(f"winner_{exp_name}_trial{trial}.pkl", TEST_SEEDS, verbose=True)
+    elif args.experiment:
+        for trial in range(args.trials):
+            if args.trials > 1:
+                print(f"\n--- Trial {trial + 1}/{args.trials} ---\n")
+            run_experiment(args.experiment, args.generations, verbose=True, trial_id=trial)
+            if args.test:
+                evaluate_winner(f"winner_{args.experiment}_trial{trial}.pkl", TEST_SEEDS, verbose=True)
+    else:
+        parser.error("Either specify an experiment name or use --run-all")

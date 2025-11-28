@@ -100,9 +100,33 @@ BASE_CONFIG = {
     },
 }
 
-EXPERIMENTS = {
+ARCHITECTURES = {
     "neat_ff": {"feed_forward": True, "use_neat": True},
     "neat_rnn": {"feed_forward": False, "use_neat": True},
     "static_ff": {"feed_forward": True, "hidden_layers": [10, 10], "use_neat": False},
     "static_rnn": {"feed_forward": False, "hidden_layers": [10], "use_neat": False},
 }
+
+PARAM_SETS = {
+    "low": {
+        "weight_mutate_rate": 0.1,
+        "node_add_prob": 0.03,
+        "conn_add_prob": 0.05,
+    },
+    "medium": {
+        "weight_mutate_rate": 0.5,
+        "node_add_prob": 0.1,
+        "conn_add_prob": 0.2,
+    },
+    "high": {
+        "weight_mutate_rate": 0.8,
+        "node_add_prob": 0.4,
+        "conn_add_prob": 0.7,
+    },
+}
+
+EXPERIMENTS = {}
+for arch_name, arch_config in ARCHITECTURES.items():
+    for param_name, param_config in PARAM_SETS.items():
+        exp_name = f"{arch_name}_{param_name}"
+        EXPERIMENTS[exp_name] = {**arch_config, "param_set": param_name}

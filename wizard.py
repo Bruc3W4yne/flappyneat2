@@ -21,7 +21,7 @@ import neat
 import game as game_module
 from game import (SwarmGame, SCREEN_WIDTH, SCREEN_HEIGHT, FLOOR_Y,
                   BIRD_X, BIRD_RX, BIRD_RY, PIPE_WIDTH, PIPE_GAP, network_to_action)
-from config import BASE_CONFIG, EXPERIMENTS, SHARED_CONFIG, GA_CONFIG, MAX_FRAMES
+from config import BASE_CONFIG, EXPERIMENTS, SHARED_CONFIG, GA_CONFIG, MAX_FRAMES, PARAM_SETS
 from trainer import (StaticNetwork, calculate_genome_size, random_genome,
                      mutate, uniform_crossover, create_network)
 
@@ -176,22 +176,52 @@ class Wizard:
     def show_experiment_selection(self):
         experiments = list(EXPERIMENTS.keys())
         selected = 0
+        scroll_offset = 0
+        visible_count = 12
+        item_height = 40
+        list_start_y = 150
+        list_height = visible_count * item_height
 
         while True:
             self.screen.fill(DARK_GRAY)
-            title = self.font_large.render("Select Experiment", True, WHITE)
-            self.screen.blit(title, (WINDOW_WIDTH // 2 - title.get_width() // 2, 100))
+            title = self.font_large.render("Select Experiment (12 configurations)", True, WHITE)
+            self.screen.blit(title, (WINDOW_WIDTH // 2 - title.get_width() // 2, 80))
 
-            for i, exp in enumerate(experiments):
+            subtitle = self.font.render("4 architectures × 3 parameter sets", True, LIGHT_GRAY)
+            self.screen.blit(subtitle, (WINDOW_WIDTH // 2 - subtitle.get_width() // 2, 120))
+
+            if selected < scroll_offset:
+                scroll_offset = selected
+            elif selected >= scroll_offset + visible_count:
+                scroll_offset = selected - visible_count + 1
+
+            for i in range(scroll_offset, min(scroll_offset + visible_count, len(experiments))):
+                exp = experiments[i]
+                display_idx = i - scroll_offset
+                y_pos = list_start_y + display_idx * item_height
+
                 color = YELLOW if i == selected else WHITE
                 exp_info = EXPERIMENTS[exp]
                 ff_rnn = "FF" if exp_info["feed_forward"] else "RNN"
-                neat_ga = "NEAT" if exp_info.get("use_neat", True) else "Static GA"
-                text = self.font.render(f"{exp} ({neat_ga}, {ff_rnn})", True, color)
-                self.screen.blit(text, (WINDOW_WIDTH // 2 - text.get_width() // 2, 200 + i * 50))
+                neat_ga = "NEAT" if exp_info.get("use_neat", True) else "Static"
+                param_set = exp_info.get("param_set", "high")
+                mutate_rate = PARAM_SETS[param_set]["weight_mutate_rate"]
+
+                text = self.font.render(
+                    f"{exp:20} | {neat_ga:6} {ff_rnn:3} | mutate={mutate_rate}",
+                    True, color
+                )
+                self.screen.blit(text, (WINDOW_WIDTH // 2 - text.get_width() // 2, y_pos))
+
+            if len(experiments) > visible_count:
+                scroll_info = f"({selected + 1}/{len(experiments)})"
+                scroll_text = self.font.render(scroll_info, True, LIGHT_GRAY)
+                self.screen.blit(scroll_text, (WINDOW_WIDTH // 2 - scroll_text.get_width() // 2,
+                                              list_start_y + list_height + 10))
 
             instructions = self.font.render("UP/DOWN to select, ENTER to start, ESC to quit", True, LIGHT_GRAY)
-            self.screen.blit(instructions, (WINDOW_WIDTH // 2 - instructions.get_width() // 2, 450))
+            self.screen.blit(instructions, (WINDOW_WIDTH // 2 - instructions.get_width() // 2,
+                                           list_start_y + list_height + 40))
 
             pygame.display.flip()
 
@@ -240,11 +270,21 @@ class Wizard:
         exp = EXPERIMENTS[experiment_name]
         config_dict = copy.deepcopy(BASE_CONFIG)
         config_dict["DefaultGenome"]["feed_forward"] = str(exp["feed_forward"])
+
+        param_set_name = exp.get("param_set", "high")
+        param_set = PARAM_SETS[param_set_name]
+        config_dict["DefaultGenome"]["weight_mutate_rate"] = str(param_set["weight_mutate_rate"])
+
         if not exp.get("use_neat", True):
             config_dict["DefaultGenome"]["node_add_prob"] = "0.0"
             config_dict["DefaultGenome"]["node_delete_prob"] = "0.0"
             config_dict["DefaultGenome"]["conn_add_prob"] = "0.0"
             config_dict["DefaultGenome"]["conn_delete_prob"] = "0.0"
+            config_dict["DefaultGenome"]["enabled_mutate_rate"] = "0.0"
+        else:
+            config_dict["DefaultGenome"]["node_add_prob"] = str(param_set["node_add_prob"])
+            config_dict["DefaultGenome"]["conn_add_prob"] = str(param_set["conn_add_prob"])
+
         config_text = self._dict_to_config_file(config_dict)
         with tempfile.NamedTemporaryFile(mode="w", suffix=".cfg", delete=False) as f:
             f.write(config_text)
@@ -382,13 +422,18 @@ class Wizard:
         elitism = SHARED_CONFIG["elitism"]
         survival_threshold = GA_CONFIG["survival_threshold"]
 
+        exp = EXPERIMENTS[self.experiment]
+        param_set_name = exp.get("param_set", "high")
+        param_set = PARAM_SETS[param_set_name]
+        weight_mutate_rate = param_set["weight_mutate_rate"]
+
         ranked = sorted(zip(self.genomes, fitnesses), key=lambda x: -x[1])
         new_population = [list(ranked[i][0]) for i in range(elitism)]
         parent_pool = [g for g, _ in ranked[:max(2, int(pop_size * survival_threshold))]]
 
         while len(new_population) < pop_size:
             p1, p2 = random.sample(parent_pool, 2)
-            child = mutate(uniform_crossover(p1, p2))
+            child = mutate(uniform_crossover(p1, p2), weight_mutate_rate)
             new_population.append(child)
 
         self.genomes = new_population
