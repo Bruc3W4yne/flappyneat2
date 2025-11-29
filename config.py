@@ -1,14 +1,11 @@
-# Training constants
 MAX_FRAMES = 5000
 MAX_FRAMES_EVAL = 50000
 TARGET_FPS = 60
 
-# Seeds for reproducibility
 TRAIN_SEEDS = [1, 7, 13, 22, 31, 45, 58, 67, 79, 88]
 TEST_SEEDS = [2, 14, 29, 38, 47, 56, 63, 74, 85, 91]
 
-# Game mode: "standard" or "oscillating" (moving pipes)
-GAME_MODE = "standard"
+GAME_MODE = "oscillating"
 
 SHARED_CONFIG = {
     "pop_size": 50,

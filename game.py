@@ -54,12 +54,13 @@ class Pipe:
         self.gap_bottom = self._gap_center + PIPE_GAP // 2
         self.passed = False
         self.frame_count = 0
+        self.phase_offset = random.uniform(0, 2 * math.pi)
 
     def update(self):
         self.x -= PIPE_VEL
         self.frame_count += 1
         if GAME_MODE == "oscillating":
-            offset = math.sin(self.frame_count * 0.05) * 30
+            offset = math.sin(self.frame_count * 0.05 + self.phase_offset) * 30
             self._gap_center = self._base_gap_center + offset
             self.gap_top = self._gap_center - PIPE_GAP // 2
             self.gap_bottom = self._gap_center + PIPE_GAP // 2
@@ -95,83 +96,7 @@ def network_to_action(output):
 
 
 class FlappyGame:
-    def __init__(self, seed=None):
-        self.seed = seed
-        self.reset()
-
-    def reset(self):
-        if self.seed:
-            random.seed(self.seed)
-        self.bird = Bird()
-        self.pipes = [Pipe()]
-        self.score = 0
-        self.done = False
-        return self.get_observation()
-
-    def get_observation(self):
-        pipe = self._next_pipe()
-        if not pipe:
-            return (0.0, 1.0, 0.0)
-        cx, cy = self.bird.center
-        norm_vel = max(-1.0, min(1.0, self.bird.vel / MAX_VEL))
-        i = max(0.0, min(1.0, (pipe.x - cx) / SCREEN_WIDTH))
-        j = max(-1.0, min(1.0, (pipe.gap_bottom - cy) / SCREEN_HEIGHT))
-        return (norm_vel, i, j)
-
-    def step(self, action):
-        if self.done:
-            return self.get_observation(), 0, True, self.score
-        if action:
-            self.bird.jump()
-        self.bird.update()
-        reward = self._update_pipes()
-        self.done = self._check_collision()
-        return self.get_observation(), reward, self.done, self.score
-
-    def _next_pipe(self):
-        for pipe in self.pipes:
-            if pipe.x + PIPE_WIDTH > self.bird.x:
-                return pipe
-        return None
-
-    def _update_pipes(self):
-        reward = 0
-        for pipe in self.pipes:
-            pipe.update()
-            if not pipe.passed and pipe.x + PIPE_WIDTH < self.bird.x:
-                pipe.passed = True
-                self.score += 1
-                reward = 1
-        self.pipes = [p for p in self.pipes if not p.off_screen]
-        if self.pipes[-1].x < SCREEN_WIDTH - 200:
-            self.pipes.append(Pipe(self.pipes[-1].gap_center))
-        return reward
-
-    def _check_collision(self):
-        cx, cy = self.bird.center
-        if cy + BIRD_RY >= FLOOR_Y or cy - BIRD_RY <= 0:
-            return True
-        for pipe in self.pipes:
-            if ellipse_rect_collide(cx, cy, BIRD_RX, BIRD_RY, pipe.top_rect):
-                return True
-            if ellipse_rect_collide(cx, cy, BIRD_RX, BIRD_RY, pipe.bottom_rect):
-                return True
-        return False
-
-
-def play_game(network, game, max_frames=5000):
-    game.reset()
-    for _ in range(max_frames):
-        obs = game.get_observation()
-        action = network_to_action(network.activate(obs))
-        _, _, done, _ = game.step(action)
-        if done:
-            break
-    return game.score
-
-
-class SwarmGame:
-    def __init__(self, num_birds, seed=None):
+    def __init__(self, num_birds=1, seed=None):
         self.num_birds = num_birds
         self.seed = seed
         self.reset()
@@ -182,54 +107,72 @@ class SwarmGame:
         self.birds = [Bird() for _ in range(self.num_birds)]
         self.alive = [True] * self.num_birds
         self.scores = [0] * self.num_birds
-        self.death_frames = [None] * self.num_birds  # Track when each bird died
+        self.death_frames = [None] * self.num_birds
         self.pipes = [Pipe()]
         self.frame = 0
-        return self.get_observations()
+        self.done = False
+        return self.get_observation() if self.num_birds == 1 else self.get_observations()
+
+    @property
+    def bird(self):
+        return self.birds[0]
+
+    @property
+    def score(self):
+        return self.scores[0]
+
+    def get_observation(self):
+        return self._get_bird_observation(0)
+
+    def step(self, action):
+        if self.num_birds == 1:
+            return self._step_single(action)
+        else:
+            return self._step_swarm(action)
+
+    def _step_single(self, action):
+        if self.done:
+            return self.get_observation(), 0, True, self.score
+        self.frame += 1
+        if action:
+            self.bird.jump()
+        self.bird.update()
+        reward = self._update_pipes_single()
+        self.done = self._check_collision(self.bird)
+        return self.get_observation(), reward, self.done, self.score
+
+    def _update_pipes_single(self):
+        reward = 0
+        for pipe in self.pipes:
+            pipe.update()
+            if not pipe.passed and pipe.x + PIPE_WIDTH < self.bird.x:
+                pipe.passed = True
+                self.scores[0] += 1
+                reward = 1
+        self.pipes = [p for p in self.pipes if not p.off_screen]
+        if self.pipes[-1].x < SCREEN_WIDTH - 200:
+            self.pipes.append(Pipe(self.pipes[-1].gap_center))
+        return reward
 
     def get_observations(self):
-        observations = []
-        pipe = self._next_pipe()
-        for i, bird in enumerate(self.birds):
-            if not self.alive[i]:
-                observations.append((0.0, 1.0, 0.0))
-                continue
-            if not pipe:
-                observations.append((0.0, 1.0, 0.0))
-                continue
-            cx, cy = bird.center
-            norm_vel = max(-1.0, min(1.0, bird.vel / MAX_VEL))
-            pipe_i = max(0.0, min(1.0, (pipe.x - cx) / SCREEN_WIDTH))
-            j = max(-1.0, min(1.0, (pipe.gap_bottom - cy) / SCREEN_HEIGHT))
-            observations.append((norm_vel, pipe_i, j))
-        return observations
+        return [self._get_bird_observation(i) for i in range(self.num_birds)]
 
-    def step(self, actions):
+    def _step_swarm(self, actions):
         self.frame += 1
-
         for i, (bird, action) in enumerate(zip(self.birds, actions)):
             if not self.alive[i]:
                 continue
             if action:
                 bird.jump()
             bird.update()
-
-        self._update_pipes()
-
+        self._update_pipes_swarm()
         for i, bird in enumerate(self.birds):
             if self.alive[i] and self._check_collision(bird):
                 self.alive[i] = False
-                self.death_frames[i] = self.frame  # Record when this bird died
-
+                self.death_frames[i] = self.frame
         return self.get_observations(), self.alive.copy(), self.scores.copy()
 
-    def _next_pipe(self):
-        for pipe in self.pipes:
-            if pipe.x + PIPE_WIDTH > BIRD_X:
-                return pipe
-        return None
-
-    def _update_pipes(self):
+    def _update_pipes_swarm(self):
         for pipe in self.pipes:
             pipe.update()
             if not pipe.passed and pipe.x + PIPE_WIDTH < BIRD_X:
@@ -240,6 +183,25 @@ class SwarmGame:
         self.pipes = [p for p in self.pipes if not p.off_screen]
         if self.pipes[-1].x < SCREEN_WIDTH - 200:
             self.pipes.append(Pipe(self.pipes[-1].gap_center))
+
+    def _get_bird_observation(self, idx):
+        if not self.alive[idx]:
+            return (0.0, 1.0, 0.0)
+        pipe = self._next_pipe()
+        if not pipe:
+            return (0.0, 1.0, 0.0)
+        bird = self.birds[idx]
+        cx, cy = bird.center
+        norm_vel = max(-1.0, min(1.0, bird.vel / MAX_VEL))
+        pipe_dist = max(0.0, min(1.0, (pipe.x - cx) / SCREEN_WIDTH))
+        y_offset = max(-1.0, min(1.0, (pipe.gap_bottom - cy) / SCREEN_HEIGHT))
+        return (norm_vel, pipe_dist, y_offset)
+
+    def _next_pipe(self):
+        for pipe in self.pipes:
+            if pipe.x + PIPE_WIDTH > BIRD_X:
+                return pipe
+        return None
 
     def _check_collision(self, bird):
         cx, cy = bird.center
@@ -257,17 +219,26 @@ class SwarmGame:
         return not any(self.alive)
 
     def get_survival_frames(self):
-        """Get survival frames for each bird (death_frame if dead, current frame if alive)."""
         return [
             self.death_frames[i] if self.death_frames[i] is not None else self.frame
             for i in range(self.num_birds)
         ]
 
     def get_fitnesses(self):
-        """Get composite fitness: survival_frames + score * 1000.
-
-        This ensures there's always a gradient even when scores are 0.
-        Passing a pipe (score +1) is worth 1000 frames of survival (~17 seconds at 60fps).
-        """
         survival = self.get_survival_frames()
         return [survival[i] + self.scores[i] * 1000 for i in range(self.num_birds)]
+
+
+SwarmGame = FlappyGame
+
+
+def play_game(network, game, max_frames=5000):
+    game.reset()
+    frames = 0
+    for frames in range(1, max_frames + 1):
+        obs = game.get_observation()
+        action = network_to_action(network.activate(obs))
+        _, _, done, _ = game.step(action)
+        if done:
+            break
+    return frames + game.score * 1000

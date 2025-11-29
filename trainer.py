@@ -13,16 +13,26 @@ from config import BASE_CONFIG, EXPERIMENTS, SHARED_CONFIG, GA_CONFIG, TRAIN_SEE
 
 class CSVReporter(neat.reporting.BaseReporter):
     def __init__(self, filename):
+        import time
         self.filename = filename
         self.generation = 0
+        self.start_time = time.time()
+        self.last_time = self.start_time
         os.makedirs(os.path.dirname(filename) if os.path.dirname(filename) else ".", exist_ok=True)
         with open(filename, "w", newline="") as f:
-            csv.writer(f).writerow(["generation", "best_fitness", "avg_fitness", "min_fitness"])
+            csv.writer(f).writerow(["generation", "best_fitness", "avg_fitness", "min_fitness", "gen_time_sec", "total_time_sec"])
 
     def post_evaluate(self, config, population, species, best_genome):
+        import time
+        current_time = time.time()
+        gen_time = current_time - self.last_time
+        total_time = current_time - self.start_time
+        self.last_time = current_time
+
         fitnesses = [g.fitness for g in population.values()]
         with open(self.filename, "a", newline="") as f:
-            csv.writer(f).writerow([self.generation, max(fitnesses), sum(fitnesses)/len(fitnesses), min(fitnesses)])
+            csv.writer(f).writerow([self.generation, max(fitnesses), sum(fitnesses)/len(fitnesses), min(fitnesses),
+                                   f"{gen_time:.2f}", f"{total_time:.2f}"])
         self.generation += 1
 
 
@@ -180,6 +190,11 @@ def uniform_crossover(p1, p2):
     return [random.choice([a, b]) for a, b in zip(p1, p2)]
 
 
+def binary_tournament_select(pop_with_fit):
+    a, b = random.sample(pop_with_fit, 2)
+    return a[0] if a[1] > b[1] else b[0]
+
+
 def single_point_crossover(p1, p2):
     point = random.randint(1, len(p1) - 1)
     return p1[:point] + p2[point:]
@@ -233,10 +248,14 @@ def run_static_ga(experiment_name, generations=None, seeds=None, verbose=True, t
     if verbose:
         print(f"Static GA: {experiment_name} | layers={hidden_layers} | mutate_rate={weight_mutate_rate} | pop={pop_size}")
 
+    import time
+    start_time = time.time()
+    last_time = start_time
+
     os.makedirs("results", exist_ok=True)
     csv_path = f"results/{experiment_name}_trial{trial_id}.csv"
     with open(csv_path, "w", newline="") as f:
-        csv.writer(f).writerow(["generation", "best_fitness", "avg_fitness", "min_fitness"])
+        csv.writer(f).writerow(["generation", "best_fitness", "avg_fitness", "min_fitness", "gen_time_sec", "total_time_sec"])
 
     population = [random_genome(genome_size) for _ in range(pop_size)]
     best_genome, best_fitness = None, -float('inf')
@@ -248,14 +267,20 @@ def run_static_ga(experiment_name, generations=None, seeds=None, verbose=True, t
             best_fitness = ranked[0][1]
             best_genome = ranked[0][0].copy()
         avg = sum(fitness_scores) / len(fitness_scores)
+
+        current_time = time.time()
+        gen_time = current_time - last_time
+        total_time = current_time - start_time
+        last_time = current_time
+
         with open(csv_path, "a", newline="") as f:
-            csv.writer(f).writerow([gen, ranked[0][1], avg, ranked[-1][1]])
+            csv.writer(f).writerow([gen, ranked[0][1], avg, ranked[-1][1], f"{gen_time:.2f}", f"{total_time:.2f}"])
         if verbose:
-            print(f"Gen {gen:3d} | Best: {ranked[0][1]:7.2f} | Avg: {avg:7.2f}")
+            print(f"Gen {gen:3d} | Best: {ranked[0][1]:7.2f} | Avg: {avg:7.2f} | Time: {gen_time:.1f}s")
         new_population = [ranked[i][0].copy() for i in range(elitism)]
-        parent_pool = [g for g, _ in ranked[:max(2, int(pop_size * survival_threshold))]]
         while len(new_population) < pop_size:
-            p1, p2 = random.sample(parent_pool, 2)
+            p1 = binary_tournament_select(ranked)
+            p2 = binary_tournament_select(ranked)
             child = mutate(crossover_fn(p1, p2), weight_mutate_rate)
             new_population.append(child)
         population = new_population

@@ -1,13 +1,3 @@
-"""
-Wizard - Visual training dashboard with 3 panels:
-1. Left: Swarm visualization (all birds playing - THIS IS THE EVALUATION)
-2. Top Right: Fitness graph
-3. Bottom Right: Network topology
-
-Key architectural change: The visualization IS the fitness evaluation.
-Birds play visually, their scores determine fitness, then evolution happens.
-"""
-
 import os
 import csv
 import copy
@@ -23,7 +13,7 @@ from game import (SwarmGame, SCREEN_WIDTH, SCREEN_HEIGHT, FLOOR_Y,
                   BIRD_X, BIRD_RX, BIRD_RY, PIPE_WIDTH, PIPE_GAP, network_to_action)
 from config import BASE_CONFIG, EXPERIMENTS, SHARED_CONFIG, GA_CONFIG, MAX_FRAMES, PARAM_SETS
 from trainer import (StaticNetwork, calculate_genome_size, random_genome,
-                     mutate, uniform_crossover, create_network)
+                     mutate, uniform_crossover, binary_tournament_select, create_network)
 
 WINDOW_WIDTH = 1400
 WINDOW_HEIGHT = 900
@@ -66,30 +56,27 @@ class Wizard:
         self.experiment = None
         self.generation = 0
         self.max_generations = SHARED_CONFIG["generations"]
-        self.fitness_history = []  # [(gen, best, avg, min), ...]
+        self.fitness_history = []
         self.training_done = False
         self.paused = False
-        self.speed = 1  # 1=normal, 0=max speed
+        self.speed = 1
 
-        # NEAT/GA specific state
         self.neat_config = None
         self.neat_population = None
         self.is_neat = True
         self.is_recurrent = False
         self.hidden_layers = []
 
-        # Current generation state
-        self.genomes = []  # List of (genome_id, genome) for NEAT or just genomes for GA
+        self.genomes = []
         self.networks = []
         self.current_best_genome = None
 
-        # Swarm game state (VISUALIZATION = EVALUATION)
         self.swarm_game = None
         self.vis_frame = 0
         self.max_frames = MAX_FRAMES
 
         self.death_time = None
-        self.death_delay = 1.0  # Seconds to show dead state before evolving
+        self.death_delay = 1.0
 
         self.game_mode = game_module.GAME_MODE
 
@@ -117,7 +104,7 @@ class Wizard:
             if self.experiment is None:
                 self.show_experiment_selection()
                 if self.experiment is None:
-                    break  # User quit during selection
+                    break
                 continue
 
             for event in pygame.event.get():
@@ -129,7 +116,6 @@ class Wizard:
                     elif event.key == pygame.K_s:
                         self.speed = 0 if self.speed == 1 else 1
                     elif event.key == pygame.K_o:
-                        # Toggle oscillating pipes
                         self.game_mode = "oscillating" if self.game_mode == "standard" else "standard"
                         game_module.GAME_MODE = self.game_mode
                     elif event.key == pygame.K_r:
@@ -242,7 +228,6 @@ class Wizard:
                         return
 
     def _start_experiment(self, experiment_name):
-        """Initialize experiment and first generation."""
         self.experiment = experiment_name
         exp = EXPERIMENTS[experiment_name]
         self.is_neat = exp.get("use_neat", True)
@@ -255,7 +240,6 @@ class Wizard:
         if self.is_neat:
             self.neat_config = self._build_neat_config(experiment_name)
             self.neat_population = neat.Population(self.neat_config)
-            # Get initial genomes
             self.genomes = list(self.neat_population.population.items())
             self._create_networks_neat()
         else:
@@ -320,20 +304,18 @@ class Wizard:
 
     def _start_generation_game(self):
         num_birds = len(self.genomes)
-        seed = int(time.time() * 1000) % (2**31)  # Random seed for variety
+        seed = int(time.time() * 1000) % (2**31)
         self.swarm_game = SwarmGame(num_birds, seed=seed)
         self.swarm_game.reset()
         self.vis_frame = 0
         self.death_time = None
 
-        # Reset recurrent networks
         if self.is_recurrent:
             for net in self.networks:
                 if hasattr(net, 'reset'):
                     net.reset()
 
     def _step_training(self):
-        """Step the training forward - runs swarm game and handles evolution."""
         if self.swarm_game is None:
             return
 
@@ -365,11 +347,7 @@ class Wizard:
             writer.writerows(self.fitness_history)
 
     def _finish_generation(self):
-        """Finish current generation: record fitness, evolve, start next."""
-        # Composite fitness for BREEDING (survival + score*1000) - ensures gradient
         fitnesses = self.swarm_game.get_fitnesses()
-
-        # Pipe SCORES for DISPLAY (what user cares about)
         scores = self.swarm_game.scores
         best_score = max(scores)
         avg_score = sum(scores) / len(scores)
@@ -420,7 +398,6 @@ class Wizard:
     def _evolve_ga(self, fitnesses):
         pop_size = SHARED_CONFIG["pop_size"]
         elitism = SHARED_CONFIG["elitism"]
-        survival_threshold = GA_CONFIG["survival_threshold"]
 
         exp = EXPERIMENTS[self.experiment]
         param_set_name = exp.get("param_set", "high")
@@ -429,10 +406,10 @@ class Wizard:
 
         ranked = sorted(zip(self.genomes, fitnesses), key=lambda x: -x[1])
         new_population = [list(ranked[i][0]) for i in range(elitism)]
-        parent_pool = [g for g, _ in ranked[:max(2, int(pop_size * survival_threshold))]]
 
         while len(new_population) < pop_size:
-            p1, p2 = random.sample(parent_pool, 2)
+            p1 = binary_tournament_select(ranked)
+            p2 = binary_tournament_select(ranked)
             child = mutate(uniform_crossover(p1, p2), weight_mutate_rate)
             new_population.append(child)
 
@@ -440,8 +417,6 @@ class Wizard:
         self._create_networks_ga()
 
     def draw_game_panel(self):
-        """Draw the swarm visualization panel with sprites (this IS the evaluation)."""
-        # Calculate scaling to fit game in panel
         scale_x = GAME_PANEL_WIDTH / SCREEN_WIDTH
         scale_y = WINDOW_HEIGHT / SCREEN_HEIGHT
         scale = min(scale_x, scale_y)
@@ -488,15 +463,12 @@ class Wizard:
                 pygame.draw.rect(self.game_surface, PIPE_GREEN,
                                (pipe_x, bot_y, pipe_w, bot_h))
 
-        # Remove clip for birds/UI (birds can fly off-screen)
         self.game_surface.set_clip(None)
 
-        # Get survival frames for transparency (shows who's doing well)
         survival = self.swarm_game.get_survival_frames()
         min_surv = min(survival) if survival else 0
         max_surv = max(survival) if survival else 1
 
-        # Sort birds by survival so better ones draw on top
         bird_data = list(zip(self.swarm_game.birds, self.swarm_game.alive, survival))
         bird_data.sort(key=lambda x: x[2])
 
@@ -530,7 +502,6 @@ class Wizard:
                 pygame.draw.ellipse(bird_surf, color, (0, 0, rx * 2, ry * 2))
                 self.game_surface.blit(bird_surf, (cx - rx, cy - ry))
 
-        # Draw base/floor (set clip again for this)
         self.game_surface.set_clip(game_rect)
         if self.sprites_loaded:
             scaled_base = pygame.transform.scale(self.base_img,
@@ -578,20 +549,17 @@ class Wizard:
                                           RIGHT_PANEL_HEIGHT // 2))
             return
 
-        # Graph area
         margin = 50
         graph_x = margin
         graph_y = 40
         graph_w = RIGHT_PANEL_WIDTH - margin * 2
         graph_h = RIGHT_PANEL_HEIGHT - margin - graph_y
 
-        # Draw axes
         pygame.draw.line(self.graph_surface, WHITE,
                         (graph_x, graph_y + graph_h), (graph_x + graph_w, graph_y + graph_h), 1)
         pygame.draw.line(self.graph_surface, WHITE,
                         (graph_x, graph_y), (graph_x, graph_y + graph_h), 1)
 
-        # Get data ranges
         gens = [h[0] for h in self.fitness_history]
         bests = [h[1] for h in self.fitness_history]
         avgs = [h[2] for h in self.fitness_history]
@@ -600,7 +568,6 @@ class Wizard:
         max_fit = max(max(bests), max(avgs)) if bests else 1
         max_fit = max(max_fit, 1)
 
-        # Draw lines
         def plot_line(data, color):
             if len(data) < 2:
                 return
@@ -615,7 +582,6 @@ class Wizard:
         plot_line(bests, GREEN)
         plot_line(avgs, BLUE)
 
-        # Draw current values
         if bests:
             current_best = bests[-1]
             current_avg = avgs[-1]
@@ -623,7 +589,6 @@ class Wizard:
             stats_render = self.font.render(stats_text, True, WHITE)
             self.graph_surface.blit(stats_render, (graph_x, graph_y + graph_h + 25))
 
-        # Legend
         pygame.draw.line(self.graph_surface, GREEN, (graph_x, graph_y - 15),
                         (graph_x + 20, graph_y - 15), 2)
         best_label = self.font.render("Best", True, GREEN)
@@ -634,7 +599,6 @@ class Wizard:
         avg_label = self.font.render("Avg", True, BLUE)
         self.graph_surface.blit(avg_label, (graph_x + 105, graph_y - 22))
 
-        # Axis labels
         y_label = self.font.render(f"{max_fit:.0f}", True, WHITE)
         self.graph_surface.blit(y_label, (5, graph_y))
         x_label = self.font.render(f"Gen {max_gen}", True, WHITE)
@@ -665,12 +629,10 @@ class Wizard:
         cx = RIGHT_PANEL_WIDTH // 2
         cy = RIGHT_PANEL_HEIGHT // 2 + 10
 
-        # Get nodes by layer
         input_nodes = [-1, -2, -3]
         output_nodes = [0]
         hidden_nodes = [k for k in genome.nodes.keys() if k not in input_nodes + output_nodes]
 
-        # Compute layers
         if hidden_nodes:
             num_layers = 3
         else:
@@ -679,7 +641,6 @@ class Wizard:
         node_pos = {}
         layer_x = lambda l: margin + (l / (num_layers - 1)) * width if num_layers > 1 else cx
 
-        # Input layer - correct labels: vel, dist (horizontal), y_off (vertical offset)
         input_labels = ["vel", "dist", "y_off"]
         for i, node in enumerate(input_nodes):
             y = cy - height // 4 + (i - 1) * (height // 3)
@@ -740,7 +701,6 @@ class Wizard:
         num_layers = len(layer_sizes)
 
         node_pos = {}
-        # Correct labels: vel, dist (horizontal distance), y_off (vertical offset)
         layer_labels = [["vel", "dist", "y_off"]]
         for i, size in enumerate(self.hidden_layers):
             layer_labels.append([f"h{j}" for j in range(size)])
